@@ -327,7 +327,7 @@ func probeChatAt(base, key string) (int, []byte, error) {
 
 // chatConfirmed 判「GET /chat/completions 的这个响应能不能说明路由存在」。纯函数，便于单测。
 // 2xx 只在响应体不是一张 HTML 页面时才算数：控制台类站点常对任意未知路径回 200 + SPA
-// 兑底页，拿它当「端点存在」会把填错的地址说成配好了（R121 单测拓到的真缺陷）。
+// 兜底页，拿它当「端点存在」会把填错的地址说成配好了（R121 单测抓出来的真缺陷）。
 func chatConfirmed(status int, body []byte) bool {
 	switch {
 	case status == http.StatusNotFound:
