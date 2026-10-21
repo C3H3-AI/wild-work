@@ -2,7 +2,8 @@
 //
 // 背景（R116）：国内版此前完全不发 X-Conversation-ID —— 国际版 2026-10-16 起已按账号
 // 灰度校验会话头族（缺即 400 / 11128 "conversation id missing"），国内版 10-20 夜里跟着
-// 上了同一套渠道校验；两边共用一份 ID 语义（见 internal/wbid），国内版不能再单边裸奔。
+// 上了同一套渠道校验；国内版不能再单边裸奔（本渠道自持实现，见 convheaders.go，
+// 不与国际版共用代码——渠道包之间不耦合是 R58/R111 的既定纪律）。
 //
 // 三层语义：会话级恒定 / 轮级一次 user send（重试复用）/ 调用级每请求新生成。
 package upstream
@@ -11,16 +12,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"testing"
 	"time"
 
 	"wild-work/internal/auth"
-)
-
-var (
-	convUUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	hex32Re    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 const cnConvBody = `{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"s"},{"role":"user","content":"第一问"}]}`
@@ -59,7 +54,7 @@ func captureCNChat(t *testing.T, uid, body string) http.Header {
 func TestChatSendsConversationFamilyID(t *testing.T) {
 	got := captureCNChat(t, "u1", cnConvBody)
 
-	if cid := got.Get("X-Conversation-ID"); !convUUIDRe.MatchString(cid) {
+	if cid := got.Get("X-Conversation-ID"); !uuidV4Re.MatchString(cid) {
 		t.Fatalf("X-Conversation-ID 缺失或形态错：%q", cid)
 	}
 	turnID := got.Get("X-Conversation-Request-ID")
@@ -135,7 +130,7 @@ func TestChatConversationFamilyFallbackRandom(t *testing.T) {
 	one := captureCNChat(t, "u1", `{"model":"deepseek-v4.1-flash"}`)
 	two := captureCNChat(t, "u1", `{"model":"deepseek-v4.1-flash"}`)
 	for _, h := range []http.Header{one, two} {
-		if !convUUIDRe.MatchString(h.Get("X-Conversation-ID")) {
+		if !uuidV4Re.MatchString(h.Get("X-Conversation-ID")) {
 			t.Fatalf("无锚点时会话 id 形态错：%q", h.Get("X-Conversation-ID"))
 		}
 	}

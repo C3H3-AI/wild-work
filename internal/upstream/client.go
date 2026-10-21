@@ -17,7 +17,6 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/idle"
 	"wild-work/internal/provider"
-	"wild-work/internal/wbid"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -325,7 +324,7 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	conv, turn := wbid.Anchors(body)
+	conv, turn := conversationAnchors(body)
 	ChatHeaders(req, a, conv, turn)
 	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP

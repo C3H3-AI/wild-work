@@ -17,7 +17,6 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/idle"
 	"wild-work/internal/provider"
-	"wild-work/internal/wbid"
 )
 
 // Client 国际版上游 HTTP 客户端。Base 可覆盖以便测试。
@@ -95,7 +94,7 @@ func commonHeaders(req *http.Request) {
 // ithtelab/workbuddy-manager#193。实测只在 body 加 conversationId 无效，
 // 头族才是校验对象（#193）。
 //
-// conv / turn 来自 wbid.Anchors（会话级 / 轮级锚点），三层语义见 internal/wbid：
+// conv / turn 来自 conversationAnchors（会话级 / 轮级锚点），三层语义见同目录 convheaders.go：
 // 会话 id 同会话恒定、轮 id 一次 user send 一个值（重试与换号复用）、
 // 调用 id 每请求新生成。锚点为空时退回随机（历史行为）。
 func chatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
@@ -114,16 +113,16 @@ func chatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
 	}
 	req.Header.Set("X-Domain", wbaiDomain)
 	injectAttributionWBAI(req)
-	// 会话头族按三层语义分层（见 internal/wbid）：
+	// 会话头族按三层语义分层（见同目录 convheaders.go）：
 	//	X-Conversation-ID         会话级（带连字符 UUID，官方抓包形态）
 	//	X-Conversation-Request-ID 轮级（32 hex，工具回调/重试/换号复用）
 	//	X-Conversation-Message-ID 调用级（32 hex，每次上游请求新生成）
 	//	X-Root-Request-ID       = 本轮 Request-ID（官方主对话同形）
 	// 旧实现把四个头绑成同一个值且每请求现生成，等于把一次多轮对话拆成上千个
 	// 一次性会话——hub#381 明确指出这是反作弊视角下最明显的非人类形态（R116）。
-	msgID := wbid.MessageID()
-	turnID := wbid.TurnID(a.UID, conv, turn)
-	req.Header.Set("X-Conversation-ID", wbid.ConversationID(a.UID, conv))
+	msgID := newMessageID()
+	turnID := turnIDOf(a.UID, conv, turn)
+	req.Header.Set("X-Conversation-ID", conversationID(a.UID, conv))
 	req.Header.Set("X-Conversation-Request-ID", turnID)
 	req.Header.Set("X-Conversation-Message-ID", msgID)
 	req.Header.Set("X-Request-ID", msgID)
@@ -262,7 +261,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // `retry_policy.retry=true` 或 `actions` 含 `RETRY` 的 429**（14003 瞬时拥塞）：
 // 上游自己说可重试，此时直接抛错并让上层罚号，会把一次可自愈的抖动放大成渠道级 503。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	conv, turn := wbid.Anchors(body)
+	conv, turn := conversationAnchors(body)
 	prepared := PrepareBody(body)
 	rateLimitRetries := 0
 	for attempt := 1; attempt <= retryMaxAttempts; attempt++ {
