@@ -38,6 +38,11 @@ type fakeUpstream struct {
 	lastBody    map[string]any
 	// rejectMsg 非空时，checkCode 直接回该错误（模拟验证码错误）。
 	rejectMsg string
+	// sendRejectMsg 非空时，sendMsgCode 直接回该错误（模拟短信下发失败/频率限制）。
+	sendRejectMsg string
+	// sendFailLeft 是「还允许失败几次下发」：用完之后恢复正常，
+	// 用于验证「下发失败可以就地重试」（#173 缺陷 A）。
+	sendFailLeft int
 	// missingUserID 为真时，checkCode 下发 session 但**不给** userid。
 	missingUserID bool
 }
@@ -57,6 +62,16 @@ func (f *fakeUpstream) handler(t *testing.T) http.Handler {
 		f.sentCount++
 		f.lastHeaders = r.Header.Clone()
 		f.lastBody = decodeEnvelope(t, r.Body)
+		if f.sendFailLeft > 0 {
+			f.sendFailLeft--
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "020004",
+				"desc": orDefault(f.sendRejectMsg, "短信发送过于频繁，请稍后再试")})
+			return
+		}
+		if f.sendRejectMsg != "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": "020004", "desc": f.sendRejectMsg})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"code": "0", "desc": "success", "sid": "s1",
 			"data": map[string]any{"msgid": f.msgid},
@@ -103,6 +118,14 @@ func decodeEnvelope(t *testing.T, r io.Reader) map[string]any {
 		t.Fatalf("请求体不是 JSON：%v（原文 %q）", err, string(raw))
 	}
 	return m
+}
+
+// orDefault 测试用：非空则原样，否则给缺省值。
+func orDefault(s, def string) string {
+	if s != "" {
+		return s
+	}
+	return def
 }
 
 // newFake 起一个假上游并让它成为默认端点；测试结束自动关闭并复位全局。
@@ -328,6 +351,10 @@ func TestSendCodeRejectsBadPhone(t *testing.T) {
 }
 
 // TestSendCodeMissingMsgIDIsError 响应缺 msgid 必须报错（不能把空串交给下一步）。
+//
+// ⚠️ 契约变更（#173）：下发失败**不再置终态**——旧行为会把会话钉成 PhaseFailed，
+// 用户重试拿回 msgid 后，后续真正的登录成功会被终态守卫丢弃（页面说成功、面板恒报旧错）。
+// 现在要求：报错依旧透到调用方，但流程保持 pending，且失败原因能从 status 里看到。
 func TestSendCodeMissingMsgIDIsError(t *testing.T) {
 	newFake(t, func(f *fakeUpstream) { f.msgid = "" })
 	statePath := isolate(t)
@@ -337,9 +364,11 @@ func TestSendCodeMissingMsgIDIsError(t *testing.T) {
 	if _, err := SendCode(NewClient(), "13800138000"); err == nil {
 		t.Fatal("缺 msgid 时应报错")
 	}
-	// 下发验证码失败是终态：Poll 必须给出可行动的错误。
-	if _, err := Poll(NewClient(), statePath); err == nil || err == ErrPending {
-		t.Fatalf("缺 msgid 后 Poll 应为终态错误，实际 %v", err)
+	if _, err := Poll(NewClient(), statePath); err != ErrPending {
+		t.Fatalf("缺 msgid 后流程应仍可继续（pending），实际 %v", err)
+	}
+	if st := CurrentStatus(); st.SendErr == "" || st.Phase != PhasePending {
+		t.Fatalf("下发失败必须可见且不终态：%+v", st)
 	}
 }
 

@@ -129,7 +129,8 @@ func (s *session) sendCode(client *http.Client, phone string) (string, error) {
 	})
 	data, err := postAccount(client, epSendCode, body)
 	if err != nil {
-		s.fail("下发短信验证码失败：" + err.Error())
+		// 不置终态：见 `noteSendFail` 注释（#173 缺陷 A）。
+		s.noteSendFail(redact("下发短信验证码失败：" + err.Error()))
 		return "", err
 	}
 	var m struct {
@@ -140,13 +141,15 @@ func (s *session) sendCode(client *http.Client, phone string) (string, error) {
 		// 不返回空串：上层会拿它去登录，服务端必然报「msgid 无效」，
 		// 用户看到的将是一个与真实原因无关的错误（ofm loomy-oauth.ts:145-149 原话）。
 		msg := "短信验证码响应缺少 msgid（上游协议可能已变化）"
-		s.fail(msg)
+		s.noteSendFail(msg)
 		return "", errors.New(msg)
 	}
 
 	s.mu.Lock()
 	s.phone = maskPhone(phone)
 	s.sendDone = true
+	s.msgid = m.MsgID
+	s.sendErr = "" // 一次成功下发就把上次的失败提示洗掉
 	s.mu.Unlock()
 	return m.MsgID, nil
 }
@@ -192,16 +195,21 @@ func (s *session) login(client *http.Client, phone, code, msgid string) (Result,
 	}
 
 	s.mu.Lock()
-	if s.ph == PhasePending || s.ph == PhaseSuccess {
-		s.result, s.hasRes, s.ph, s.errMsg = r, true, PhaseSuccess, ""
+	// 已取消（Shutdown / 面板已放弃本流程）不得复活；除此之外的一律接受。
+	//
+	// 旧条件是 `ph == PhasePending || ph == PhaseSuccess`，它把 PhaseFailed 也算「不可再写」，
+	// 于是一次下发失败后的**真实登录成功**会被静默丢弃（#173 缺陷 A）：
+	// 页面回「登录成功」、面板 Poll 恒报旧的「下发失败」，两边说法相反且无法自愈。
+	if s.ph != PhaseCancelled {
+		s.result, s.hasRes, s.ph, s.errMsg, s.sendErr = r, true, PhaseSuccess, "", ""
 		s.phone = maskPhone(phone)
 	}
 	s.mu.Unlock()
 	return r, nil
 }
 
-// fail 置终态失败。
-func (s *session) fail(msg string) { s.setFailed(redact(msg)) }
+// 注：曾有的 `func (s *session) fail()` （下发失败直接置终态）已删除——
+// 它正是 #173 缺陷 A 的入口，终态失败现在只由超时/硬失败走 session.setFailed。
 
 // deriveUID 从 session 派生稳定 UID（userid 缺失时才用）。
 //

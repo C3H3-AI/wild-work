@@ -67,8 +67,9 @@ func (s *session) handleGuide(w http.ResponseWriter, r *http.Request) {
 
 // handleSendCode 下发短信验证码。
 //
-// 失败**置终态**：下发不出验证码，整条流程就没有意义（重试只会放大上游风控风险，
-// 也让用户看不出「没收到短信」的真实原因）。
+// 失败**不置终态**（#173）：短信下发失败大多是可恢复的（点太快撞上间隔限制、上游瞬时抖动），
+// 置终态会让后续的**真实成功**被丢弃（见 session.login 里的守卫变迁）。
+// 页面拿到具体 err.message 后可以再点一次，会话保持 pending 直到 flowTTL。
 func (s *session) handleSendCode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -106,6 +107,20 @@ func (s *session) handleLogin(w http.ResponseWriter, r *http.Request) {
 	code, _ := body["code"].(string)
 	msgid, _ := body["msgid"].(string)
 
+	// 面板侧已经放弃本流程（Poll 取到失败/取消后 Shutdown 把 cur 置 nil）时，
+	// 引导页标签页可能还开着。此时提交会真的拿到一个可用 session，
+	// 却再没人取走落盘 —— 又是一次「页面说成功、软件没入库」，所以必须当场说清。
+	if !s.isCurrent() {
+		writeJSON(w, map[string]any{"ok": false,
+			"message": "本次登录流程已结束，请回面板重新点「添加账号 → Loomy」再试一次"})
+		return
+	}
+	// 页面刷新后 msgid 会丢（#173 缺陷 B）：服务端留一份，提交时能补上就补上，
+	// 不让用户为「刷新了一下」而不得不重发短信（重发还会撞上发送间隔限制）。
+	if strings.TrimSpace(msgid) == "" {
+		msgid = s.storedMsgID()
+	}
+
 	if _, err := s.login(s.guideClient(), strings.TrimSpace(phone), strings.TrimSpace(code), strings.TrimSpace(msgid)); err != nil {
 		// 就地报错让用户重试（不关页面、不置终态）。
 		writeJSON(w, map[string]any{"ok": false, "message": err.Error()})
@@ -115,6 +130,9 @@ func (s *session) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStatus 供页面在提交后确认状态（也便于用户手动刷新排查）。
+//
+// 只监听 127.0.0.1（见 Start），所以这里可以回 msgid（刷新后恢复表单）；
+// 但**绝不回 session/token**，也不回手机号明文（只回脱敏形态）。
 func (s *session) handleStatus(w http.ResponseWriter, r *http.Request) {
 	st := s.status()
 	writeJSON(w, map[string]any{
@@ -122,6 +140,8 @@ func (s *session) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"has_session": st.HasSession,
 		"phone":       st.Phone,
 		"error":       st.Err,
+		"send_error":  st.SendErr,
+		"msgid":       s.storedMsgID(),
 	})
 }
 
@@ -205,6 +225,17 @@ const guidePage = `<!DOCTYPE html>
     }).then(function (r) { return r.json(); });
   }
 
+  // 刷新恢复：msgid 服务端也留了一份（引导页只监听 loopback），页面重载后自动接回，
+  // 不至于卡在「请先点获取验证码」（#173 缺陷 B）。
+  fetch('` + apiStatusPath + `').then(function (r) { return r.json(); }).then(function (st) {
+    if (st && st.msgid) {
+      msgid = st.msgid;
+      setStatus('验证码已下发过，直接填短信验证码点「登录」即可。', 'ok');
+    } else if (st && st.send_error) {
+      setStatus('上次验证码下发失败：' + st.send_error + '（可再点一次「获取验证码」）', 'err');
+    }
+  }).catch(function () {});
+
   sendBtn.addEventListener('click', function () {
     var phone = digits(phoneEl);
     if (phone.length !== 11) { setStatus('请输入 11 位手机号', 'err'); return; }
@@ -220,7 +251,7 @@ const guidePage = `<!DOCTYPE html>
           setStatus((res && res.message) || '发送失败', 'err');
         }
       })
-      .catch(function () { setStatus('发送失败，请重试', 'err'); })
+      .catch(function () { setStatus('连不上本工具的登录引导服务（面板侧可能已结束本次登录），请回面板重新发起登录', 'err'); })
       .finally(function () { sendBtn.disabled = false; });
   });
 
@@ -237,7 +268,7 @@ const guidePage = `<!DOCTYPE html>
         if (res && res.ok) setStatus(res.message || '登录成功，可以关闭此窗口了', 'ok');
         else setStatus((res && res.message) || '登录失败，请重试', 'err');
       })
-      .catch(function () { setStatus('登录失败，请重试', 'err'); })
+      .catch(function () { setStatus('连不上本工具的登录引导服务（面板侧可能已结束本次登录），请回面板重新发起登录', 'err'); })
       .finally(function () { loginBtn.disabled = false; });
   });
 })();

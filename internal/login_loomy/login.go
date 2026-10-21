@@ -156,7 +156,11 @@ const (
 	PhasePending phase = "pending"
 	// PhaseSuccess 已换到 session，等待 Poll 取走。
 	PhaseSuccess phase = "success"
-	// PhaseFailed 终态失败（下发验证码就失败了 / 引导页起不来）。
+	// PhaseFailed 终态失败（登录超时 / 引导页起不来等「流程已无法继续」的硬失败）。
+	//
+	// ⚠️ 下发短信验证码失败**不再**归到这里（#173）：它曾把会话钉成终态，
+	// 用户再点一次拿到验证码后，`login` 虽然上游成功却被终态守卫丢弃，
+	// 页面回「登录成功」、面板 Poll 恒报旧错 —— 两边说法相反且无法自愈。
 	PhaseFailed phase = "failed"
 	// PhaseCancelled 被 Shutdown 取消。
 	PhaseCancelled phase = "cancelled"
@@ -171,6 +175,9 @@ type Status struct {
 	HasSession bool
 	// Err 终态失败原因。
 	Err string
+	// SendErr 是**非终态**的「上一次验证码下发失败」提示（仍可就地重试）。
+	// 不把它做成终态的理由见 PhaseFailed 注释；但完全不透出又会让面板以为一切正常。
+	SendErr string
 }
 
 // String 便于日志与测试断言。
@@ -192,6 +199,10 @@ type session struct {
 	result   Result
 	hasRes   bool // result 是否可被取走
 	sendDone bool // 本次流程是否已成功下发过验证码
+	// msgid 上一次成功下发的短信业务 id；**只存活在 loopback 引导页那侧时，刷新即丢**（#173 缺陷 B），
+	// 故服务端也留一份（它不是凭据，但也不向外广播，仅供同一引导页恢复）。
+	msgid   string
+	sendErr string // 非终态的「上次下发失败」提示
 
 	srv *http.Server
 	ln  net.Listener
@@ -217,8 +228,33 @@ func CurrentStatus() Status {
 func (s *session) status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Status{Phase: s.ph, Phone: s.phone, HasSession: s.hasRes, Err: s.errMsg}
+	return Status{Phase: s.ph, Phone: s.phone, HasSession: s.hasRes, Err: s.errMsg, SendErr: s.sendErr}
 }
+
+// noteSendFail 记录一次「验证码下发失败」但**保持 pending**，让用户能在同一页面重试。
+//
+// 为什么不置终态（#173 缺陷 A）：短信下发失败大多是**可恢复**的（点太快撞上间隔限制、
+// 讯飞侧瞬时抖动），而一旦置了 PhaseFailed，后续真正的成功会被 `login` 的终态守卫吃掉，
+// 同时面板 Poll 拿到的是旧错误 —— 用户看到「页面说成功了但账号加不进去」且无法自愈。
+func (s *session) noteSendFail(msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sendErr = msg
+}
+
+// storedMsgID 取上一次成功下发得到的 msgid（页面刷新后据此可继续提交）。
+func (s *session) storedMsgID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.msgid
+}
+
+// isCurrent 判断本会话是否仍是全局进行中的那一条。
+//
+// 面板 Poll 拿到失败/取消后会 Shutdown()（cur 置 nil），但**引导页标签页还开着**。
+// 此时页面再提交，上游会真的返回一个可用 session，却再也没人取走落盘 ——
+// 于是又是一次「页面成功、软件没入库」。所以提交前必须问一句。
+func (s *session) isCurrent() bool { return currentSession() == s }
 
 // setFailed 置终态失败（已 success 时不降级）。
 func (s *session) setFailed(msg string) {
