@@ -707,6 +707,11 @@ function renderTopbar() {
   $("serverLine").textContent = state.running ? "服务运行中" : "服务未启动";
   $("aboutVer").textContent = state.version;
 
+  if (state.update) {
+    updateState = state.update;
+    renderUpdateNotice(updateState);
+  }
+
   const wildcard = state.listen_host === "0.0.0.0" || state.listen_host === "" || state.listen_host === "::";
   const host = wildcard ? (state.lan_ip || "127.0.0.1")
     : (state.listen_host === "localhost" ? "127.0.0.1" : state.listen_host);
@@ -3053,6 +3058,204 @@ function closeHelp() { $("helpOverlay").classList.add("hidden"); }
 function openAbout() { $("aboutOverlay").classList.remove("hidden"); }
 function closeAbout() { $("aboutOverlay").classList.add("hidden"); }
 
+// ---------- 自动更新前端模块 ----------
+let updateState = null;
+let updatePollTimer = null;
+
+function fmtBytes(bytes) {
+  if (!bytes || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + " " + units[i];
+}
+
+function renderUpdateNotice(up) {
+  if (!up || !up.has_update) {
+    $("btnUpdateNotice").classList.add("hidden");
+    return;
+  }
+  $("btnUpdateNotice").classList.remove("hidden");
+  if (up.status === "ready" || up.ready_to_restart) {
+    $("btnUpdateNotice").title = "新版本已就绪，点击重启生效";
+    $("btnUpdateNotice").style.color = "var(--primary)";
+  } else {
+    $("btnUpdateNotice").title = "发现新版本 " + (up.latest_version || "");
+    $("btnUpdateNotice").style.color = "var(--warn)";
+  }
+}
+
+function renderUpdateModalContent(st) {
+  if (!st) return;
+  $("updateTargetVer").textContent = st.latest_version || (st.release && st.release.tag_name) || "新版本";
+  $("updateCurrentVer").textContent = "（当前 v" + (st.current_version || (state && state.version) || "") + "）";
+  if (st.release && st.release.asset && st.release.asset.size > 0) {
+    $("updateSizeBadge").textContent = fmtBytes(st.release.asset.size);
+    $("updateSizeBadge").style.display = "inline-block";
+  } else {
+    $("updateSizeBadge").style.display = "none";
+  }
+  $("updateChangelogBox").textContent = (st.release && (st.release.changelog || st.release.title)) || "暂无更新日志说明";
+
+  const btnAction = $("btnUpdateAction");
+  const btnLater = $("btnUpdateLater");
+  const btnIgnore = $("btnUpdateIgnore");
+  const progArea = $("updateProgressArea");
+  const errBox = $("updateErrorBox");
+
+  if (st.status === "ready" || st.ready_to_restart) {
+    $("updateModalTitle").textContent = "更新已就绪";
+    progArea.classList.add("hidden");
+    errBox.classList.add("hidden");
+    btnAction.textContent = "立即重启生效";
+    btnAction.disabled = false;
+    btnLater.style.display = "inline-block";
+    btnIgnore.style.display = "none";
+  } else if (st.status === "downloading" || st.downloading) {
+    $("updateModalTitle").textContent = "正在下载更新...";
+    progArea.classList.remove("hidden");
+    errBox.classList.add("hidden");
+    const pct = Math.min(100, Math.max(0, st.progress || 0));
+    $("updateProgressPercent").textContent = pct.toFixed(1) + "%";
+    $("updateProgressBar").style.width = pct + "%";
+    $("updateSpeed").textContent = fmtBytes(st.speed_bytes_per_sec) + "/s";
+    $("updateBytes").textContent = `${fmtBytes(st.downloaded_bytes)} / ${fmtBytes(st.total_bytes)}`;
+    btnAction.textContent = "正在下载...";
+    btnAction.disabled = true;
+    btnLater.style.display = "inline-block";
+    btnIgnore.style.display = "none";
+  } else if (st.status === "failed") {
+    $("updateModalTitle").textContent = "更新失败";
+    progArea.classList.add("hidden");
+    errBox.classList.remove("hidden");
+    errBox.textContent = "更新遇到错误：" + (st.error || "未知失败");
+    btnAction.textContent = "重试更新";
+    btnAction.disabled = false;
+    btnLater.style.display = "inline-block";
+    btnIgnore.style.display = "inline-block";
+  } else {
+    $("updateModalTitle").textContent = "发现新版本";
+    progArea.classList.add("hidden");
+    errBox.classList.add("hidden");
+    btnAction.textContent = "立即更新";
+    btnAction.disabled = false;
+    btnLater.style.display = "inline-block";
+    btnIgnore.style.display = "inline-block";
+  }
+}
+
+async function openUpdateModal() {
+  $("updateOverlay").classList.remove("hidden");
+  try {
+    const st = await api("/api/update/status");
+    updateState = st;
+    renderUpdateNotice(st);
+    renderUpdateModalContent(st);
+    if (st.status === "downloading" || st.downloading) {
+      startUpdatePolling();
+    }
+  } catch (e) {
+    if (updateState) renderUpdateModalContent(updateState);
+  }
+}
+
+function closeUpdateModal() {
+  $("updateOverlay").classList.add("hidden");
+  stopUpdatePolling();
+}
+
+function startUpdatePolling() {
+  if (updatePollTimer) return;
+  updatePollTimer = setInterval(async () => {
+    try {
+      const st = await api("/api/update/status");
+      updateState = st;
+      renderUpdateNotice(st);
+      renderUpdateModalContent(st);
+      if (st.status !== "downloading" && !st.downloading) {
+        stopUpdatePolling();
+      }
+    } catch (e) {
+      stopUpdatePolling();
+    }
+  }, 600);
+}
+
+function stopUpdatePolling() {
+  if (updatePollTimer) {
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+  }
+}
+
+async function manualCheckUpdate() {
+  const btn = $("btnCheckUpdate");
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = "检查中...";
+  try {
+    const st = await api("/api/update/check");
+    updateState = st;
+    renderUpdateNotice(st);
+    if (st.has_update) {
+      closeAbout();
+      openUpdateModal();
+    } else {
+      toast("当前已是最新版本 (" + (st.current_version || ("v" + state.version)) + ")");
+    }
+  } catch (e) {
+    toast("检查更新失败：" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+async function ignoreUpdate() {
+  if (!updateState || !updateState.latest_version) {
+    closeUpdateModal();
+    return;
+  }
+  const ver = updateState.latest_version;
+  try {
+    await api("/api/update/dismiss", { version: ver });
+    closeUpdateModal();
+    if (updateState) updateState.has_update = false;
+    renderUpdateNotice(updateState);
+    toast("已忽略版本 " + ver);
+  } catch (e) {
+    toast("忽略版本失败：" + e.message);
+  }
+}
+
+async function handleUpdateAction() {
+  const btn = $("btnUpdateAction");
+  if (updateState && (updateState.status === "ready" || updateState.ready_to_restart)) {
+    btn.disabled = true;
+    btn.textContent = "正在重启...";
+    try {
+      await api("/api/update/restart");
+      toast("wild-work 正在重启，3 秒后自动刷新页面...");
+      setTimeout(() => location.reload(), 3000);
+    } catch (e) {
+      toast("重启失败：" + e.message);
+      btn.disabled = false;
+      btn.textContent = "立即重启生效";
+    }
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "正在启动下载...";
+  try {
+    await api("/api/update/download");
+    startUpdatePolling();
+  } catch (e) {
+    toast("启动下载失败：" + e.message);
+    btn.disabled = false;
+    btn.textContent = "重试更新";
+  }
+}
+
 // ---------- 通用确认框 ----------
 function confirmDialog(msg, onOk) {
   $("confirmMsg").textContent = msg;
@@ -3441,6 +3644,15 @@ function bind() {
   $("btnAbout").onclick = openAbout;
   $("btnHelpClose").onclick = closeHelp;
   $("btnAboutClose").onclick = closeAbout;
+
+  // 自动更新交互绑定
+  $("btnUpdateNotice").onclick = () => openUpdateModal();
+  $("btnCheckUpdate").onclick = manualCheckUpdate;
+  $("btnUpdateModalClose").onclick = closeUpdateModal;
+  $("btnUpdateLater").onclick = closeUpdateModal;
+  $("btnUpdateIgnore").onclick = ignoreUpdate;
+  $("btnUpdateAction").onclick = handleUpdateAction;
+  $("updateOverlay").onclick = (e) => { if (e.target === $("updateOverlay")) closeUpdateModal(); };
 
   // 登录确认弹层
   $("btnLoginConfirm").onclick = confirmLogin;
