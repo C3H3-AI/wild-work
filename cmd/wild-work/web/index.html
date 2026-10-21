@@ -431,6 +431,11 @@
           <label class="lbl wide" style="margin-top:4px">签到时间</label>
           <div class="times-wrap">
             <div id="timesBox" class="times"></div>
+            <span id="timeEditor" class="time-editor" hidden>
+              <input type="time" id="timePicker" class="input time-pick" step="60">
+              <button class="btn small primary" id="btnTimeOk">确定</button>
+              <button class="btn small" id="btnTimeCancel">取消</button>
+            </span>
             <button class="time-add-btn" id="btnAddTime" title="增加一个签到时间">＋ 时间</button>
           </div>
         </div>

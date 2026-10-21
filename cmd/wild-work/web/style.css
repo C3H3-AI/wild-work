@@ -1685,3 +1685,8 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 @media (max-width: 640px) {
   .fb-foot-row .half2 { flex: 1 1 100%; }
 }
+
+/* 就地时间选择器（点「＋」展开；选完确定才写盘，取消/空白不发请求） */
+.time-editor { display: inline-flex; align-items: center; gap: 6px; }
+.time-editor[hidden] { display: none; }
+.time-pick { width: 116px; padding: 5px 8px; font-size: 13px; }
