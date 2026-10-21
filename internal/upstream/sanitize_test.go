@@ -24,6 +24,9 @@ const (
 	// DSH 身份句：上游对 system 消息**开头**逐字前缀匹配这一串即回 400 code=11-128
 	// （放 user role、非开头、或写成 "powered by DeepSeek." 都放行，2026-10-21 单发 A/B 实测）。
 	dshIdentity = "You are an AI agent powered by DeepSeek Harness"
+	// DSH Web GUI 段：与后半句（"they mean this GUI."）连成 221 字符整段逐字串；单独出现任一半
+	// 或截短一字符均放行，只有完整串回 400 code=11-128（2026-10-21 单发 A/B 实测）。
+	dshWebGUI = "DeepSeek Harness Web GUI"
 )
 
 // DSH 身份句必须被改写：只插冠词 the，其余措辞原样保留（语义扰动最小）。
@@ -55,6 +58,49 @@ func TestPrepareBodySanitizesDSHSystem(t *testing.T) {
 	}
 	if !strings.Contains(sys, "powered by the DeepSeek Harness") {
 		t.Errorf("DSH rewrite missing: %q", sys)
+	}
+}
+
+// Web GUI 身份段必须被改写：缩写为 DSH 即破坏整段逐字前缀，其余措辞原样保留。
+func TestDSHWebGuiRewritten(t *testing.T) {
+	in := dshWebGUI + ", not the CLI or desktop app. If the user says GUI, they mean this GUI."
+	out := sanitizeText(in)
+	if strings.Contains(out, dshWebGUI) {
+		t.Errorf("DSH Web GUI 指纹仍在: %q", out)
+	}
+	if !strings.Contains(out, "DSH Web GUI") {
+		t.Errorf("DSH Web GUI 改写缺失: %q", out)
+	}
+	if !strings.Contains(out, ", not the CLI or desktop app.") {
+		t.Errorf("后缀被误删: %q", out)
+	}
+}
+
+// 上游回 400 的是「身份句 + Web GUI 段 + 后缀」组成的整段逐字串，改写后两处指纹都必须消失。
+func TestDSHFullPromptBroken(t *testing.T) {
+	in := dshIdentity + ". " + dshWebGUI + ", not the CLI or desktop app. " +
+		"If the user says gui, they mean this GUI."
+	out := sanitizeText(in)
+	if strings.Contains(out, dshIdentity) || strings.Contains(out, dshWebGUI) {
+		t.Errorf("整段逐字串未被破坏，上游仍会回 11-128: %q", out)
+	}
+	if !strings.Contains(out, "DSH Web GUI") {
+		t.Errorf("Web GUI 改写缺失: %q", out)
+	}
+	if !strings.Contains(out, "they mean this GUI.") {
+		t.Errorf("后半句被误删: %q", out)
+	}
+}
+
+// 反向护栏：不含 Web GUI 段的文本不得被该规则介入（实测只含身份句的 prompt 单发回 200）。
+func TestDSHWebGuiRuleDoesNotLeak(t *testing.T) {
+	for _, in := range []string{
+		"You use the web GUI to do work.", // 含 web gui 但不是 DSH 品牌短语
+		"DeepSeek Harness CLI",            // 含品牌但不是 Web GUI 段
+	} {
+		if out := sanitizeText(in); out != in {
+			t.Errorf("非指纹文本被改动: %q -> %q", in, out)
+		}
 	}
 }
 
@@ -360,8 +406,8 @@ func TestPrepareBodySanitizesSystem(t *testing.T) {
 	}
 }
 
-// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 8 项 +
-// sanitizeRewrites 6 对 + 3 个正则的当前字节值硬编码断言。
+// TestSanitizeLiteralByteExact 逐字节快照护栏：把 sanitizeFeatures 9 项 +
+// sanitizeRewrites 7 对 + 3 个正则的当前字节值硬编码断言。
 // 这些字面量是实验逆向出的上游内容审核黑名单（无契约可引用），上游按逐字精确
 // 匹配拦截，一字之差即漏拦（400 code=11128）或误伤。任何未来改动（含看似无害的
 // 统一常量/抽配置）都会先红在本测试——必须走 analysis 报告 #6 的逐字节验证
@@ -378,6 +424,8 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"11128",                                           // 上游反探测：裸数字错误码
 		// DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
 		"You are an AI agent powered by DeepSeek Harness",
+		// DSH Web GUI 段：整段 221 字符逐字串的前半段（2026-10-21 实测）
+		"DeepSeek Harness Web GUI",
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -413,6 +461,11 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 			// DSH 身份句：只插冠词 the，保留 powered by 原措辞，语义扰动最小
 			"You are an AI agent powered by DeepSeek Harness",
 			"You are an AI agent powered by the DeepSeek Harness",
+		},
+		{
+			// DSH Web GUI：缩写为 DSH 即破坏整段逐字前缀，语义不变（实测 200）
+			"DeepSeek Harness Web GUI",
+			"DSH Web GUI",
 		},
 	}
 	if len(sanitizeRewrites) != len(rewrites) {
