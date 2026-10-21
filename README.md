@@ -340,7 +340,15 @@ export ANTHROPIC_MODEL="traework/glm-5.2"
 > （会返回 400 并提示）。客户端需在 `input` 中携带完整历史（Codex CLI 默认如此）。
 > 另外 WorkBuddy 国内版/国际版上游对某些 agent 系统提示词（如 Codex CLI 自带的那份）
 > 会触发内容策略拦截（上游返回 `code=11128 Illegal API invocation from an unapproved channel`），
-> 实测 `traework/*`、`qoder/*`、部分 `workbuddy/*` 模型不受影响；如遇拦截请更换渠道模型。
+> 网关已对已知模板句（Codex CLI、DeepSeek Harness 身份句等）做等价改写绕过，
+> 见 `internal/sanitize`；如仍遇拦截请更换渠道模型。
+>
+> 📸 **图片相关（已自动处理，无需配置）**：
+> - 工具结果里的截图（Codex `view_image`）走 vision 通道，**不会**变成 base64 文本；
+> - 内联 base64 图片在转发前降采样到长边 ≤1568（JPEG q85，透明图走 PNG），
+>   典型 12 张 2048px 截图的会话请求体由 33MiB 降到 4MiB；
+> - 入站请求体上限默认 **128MiB**，可用 `config.json` 的 `server.max_request_body_mb` 调整
+>   （钳 8~1024）；超限返回 413 并提示实际限额。
 
 ### 5. 生图 API（OpenAI Images 兼容，glm 渠道）
 

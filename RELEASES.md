@@ -3327,3 +3327,100 @@ DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转
 - 同步更新 `internal/upstream/sanitize_test.go` 的逐字节快照护栏
   （`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对），并新增 3 个回归用例
   （改写生效 / 经 `PrepareBody` 落到 system content / 措辞相近的变体不得被误改）。
+
+---
+
+# wild-work v2.9.4
+
+本版合并三个外部 PR（#175 / #177 / #178），修掉 Codex 长会话「图片打爆上下文」与
+「请求体 413」这两条让人彻底干不下去的故障，外加一条绕过上游渠道校验的脱敏补丁。
+对应决议 **R113 / R114 / R115**（原 PR 自带编号 R108/R109 与远端已占决议号撞车，合入时顺延）。
+
+## 🖼 工具结果里的图片改走 vision 通道（R113，PR #175，fix #174，[@prince121212](https://github.com/prince121212)）
+
+Codex 的 `view_image` 把截图以 `input_image` 块放进 `function_call_output`。旧版
+`internal/gateway` 的 `stringifyOutput` 取不到文本块就回退 `json.Marshal`，
+整张 PNG 的 base64 变成一条超长**文本**消息：
+
+- 实测 1.6MB base64（1996×1248 PNG）≈ **146 万 token**，把 1M 上下文的
+  `deepseek-v4.1-flash` 打成 `prompt is too long: 1596603 tokens > 1048576 maximum`；
+- 同一张图按 vision 只花约 **1K token**（差 1500 倍）；
+- 更糟的是 Codex 本地 token 计数**不含** base64（129,934 → 130,648 只涨 714），
+  950K 的压缩阈值永远触发不了 ⇒ 每轮原样重放，会话彻底报废，`/compact` 也救不了。
+
+改为 `toolContentValue`：`input_image` / `image_url` / Anthropic `image{source}`
+一律转成 Chat 的 `image_url` 内容块（`role:"tool"` 的 content 用数组，`detail` 透传）；
+**纯文本仍返回 string**（零行为变化，兼容只认 string 的上游）；只有图片时补 `[image]` 文本占位。
+`/v1/responses`、`role:"tool"` message、Anthropic `tool_result` 三处统一走它，
+WorkBuddy 国内版/国际版一并修复。
+
+> 实测：旧版 `prompt is too long` → 新版 `input_tokens=1013`，模型准确描述截图内容
+> （`workbuddy/deepseek-v4-pro` 亦 1013→3271 正常）。
+> **未覆盖**：gemini/codearts/monkeycode/zcode/minimax 等原生渠道各自转换协议，
+> 其中 `textBlocksOnly` / `toolResultBlocks` 会把工具结果的图片静默丢弃（不爆炸，但看不到图）。
+
+## 📦 请求体上限 128MiB + 转发前图片降采样（R114，PR #177，fix #176，[@prince121212](https://github.com/prince121212)）
+
+R113 解决了 **token 维**，但 **字节维**还在：Codex 是无状态客户端（不支持
+`previous_response_id`），每轮把整段历史原样重放，截图会线性累积。实测一个会话
+426 个 item 里 **12 张 2048px 截图占 33.01MiB**（其余文本仅 0.43MiB），
+请求体 33.44MiB 撞 32MiB 硬限 `413 Payload Too Large`——这个 413 发生在**读入站 body**
+阶段（`ReadBodyLimited`），R113 无论怎么修都挡不住。
+
+两道闸：
+
+1. **上限可配**：`server.MaxRequestBody` 由常量改为变量，默认 **128MiB**；
+   `config.json` 新增 `server.max_request_body_mb`（钳 8~1024）；413 文案按**生效上限**
+   推导（不再写死 32MiB）；新增 `server.IsBodyTooLarge(err)` 供 gateway 跨包判定
+   （原先靠 `strings.Contains(err,"exceeds limit")` 字符串匹配，脆弱）；
+   `gateway.maxInnerBody` 由常量改函数（常量会在包初始化时把上限快照死）。
+2. **转发前降采样**：新增 `internal/gateway/imageslim.go`，三个图片入口
+   （用户附图 / `function_call_output` / Anthropic `image` 块）统一把内联
+   `data:image/...;base64` 缩到长边 **≤1568**：不透明图 → **JPEG q85**，
+   带 alpha → **PNG**（转 JPEG 会把透明区涂黑）；按 payload sha256 缓存 256 条
+   （历史重放时同一张图每轮都会进来，命中即免解码）。
+
+保守边界：只动 `data:` URL，`http(s)` 直链不下载不改写；解码失败 / 重编码后变大 /
+体积 ≤512KB 且长边已合规 ⇒ 原样返回；像素 >5000 万放弃（防解压炸弹）。
+
+> 实测：同一 33.48MiB 请求体，旧版逐字 `413 ... 33554432 bytes`，新版
+> `400 invalid_model`（假模型名，证明已过读入闸）；60/120MiB 通过、140MiB 回 413
+> 且文案变为 `134217728 bytes`；把该会话 426 项整体走 `responsesToChat`
+> **33.48MiB → 4.03MiB（8.3x）**，12 张图 33.01→2.86MiB。
+> 真实上游单发 3 张原始截图 `200 / input_tokens=655`，回复逐张准确描述画面
+> （连底部「WASD移动」小字都读对）。
+
+## 🛡 出站脱敏补一条 DSH 身份句（R115，PR #178，[@wzwjustdoit](https://github.com/wzwjustdoit)）
+
+上游对 `system` 消息做**开头逐字前缀**匹配：只要 system 以
+`You are an AI agent powered by DeepSeek Harness` 开头（句号可有可无），即回
+`HTTP 400 {"code":11-128,"msg":"Illegal API invocation from an unapproved channel"}`。
+DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转发的 DSH Agent
+请求稳定撞上 11-128。
+
+单发 A/B 实测（同渠道同模型）确认判据是**逐字前缀**而非关键词/语义审核：
+该句放 user role → 200；system 放第二句 → 200；前面加一行 → 200；
+截成 `powered by DeepSeek Harness.` 或 `powered by DeepSeek.` → 200；
+**只有「system 开头 + 完整第一句」→ 400**。
+
+- `internal/sanitize`（`PrepareBody` 真实入口）与 `internal/upstream`（内层平行实现）
+  两份脱敏表各补一条：特征串 + 最小改写「在 `DeepSeek Harness` 前插入冠词 `the`」。
+- 选插冠词的理由：语义扰动最小、改动可见可 review、不依赖不可见字符
+  （全角空格会被 NFKC 折叠，抗归一化差）；`built on` 会换实词。
+
+## ✅ 验证
+
+- `go build ./... && go vet ./... && go test ./...` 全绿；
+- 本版新增回归：`internal/gateway/tool_image_test.go` 7 例、
+  `internal/gateway/image_slim_test.go` 6 例、
+  `internal/upstream/sanitize_test.go` 新增 3 例（改写生效 / 经 `PrepareBody` 落到
+  system content / 措辞相近变体不得被误改）并同步逐字节快照护栏
+  （`sanitizeFeatures` 7→8 项、`sanitizeRewrites` 5→6 对）；
+- `internal/server/handler_bodylimit_test.go` 改为基于变量断言（不写死 32MiB）。
+
+## 🙏 致谢
+
+| 贡献者 | 内容 |
+|--------|------|
+| [@prince121212](https://github.com/prince121212) | PR #175 工具结果图片走 vision（R113）+ PR #177 请求体上限与图片降采样（R114），含真机 A/B 实测 |
+| [@wzwjustdoit](https://github.com/wzwjustdoit) | PR #178 DSH 身份句脱敏（R115），含完整直发实测矩阵 |
