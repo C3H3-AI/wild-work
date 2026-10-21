@@ -518,6 +518,13 @@ func Classify(status int, body string) provider.ErrKind {
 		return provider.ErrServer
 	}
 	if status >= 400 {
+		// 会话头族缺失（11128 "conversation id missing"）是上游按账号灰度的渠道校验，
+		// 属账号级问题（补头后仍撞 ⇒ 该号被灰度到别的口径）：软冷却 + 换号。必须排在
+		// contentBlocked 之前——同码的另一形态 "Illegal API invocation from an unapproved
+		// channel" 才是请求级指纹问题（改提示词就能过，不罚号）。R116。
+		if strings.Contains(lower, "conversation id missing") {
+			return provider.ErrAccountFault
+		}
 		if strings.Contains(lower, "blocked by security policy") ||
 			strings.Contains(lower, "unapproved channel") ||
 			strings.Contains(lower, "illegal api invocation") {

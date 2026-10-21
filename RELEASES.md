@@ -3424,3 +3424,58 @@ DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转
 |--------|------|
 | [@prince121212](https://github.com/prince121212) | PR #175 工具结果图片走 vision（R113）+ PR #177 请求体上限与图片降采样（R114），含真机 A/B 实测 |
 | [@wzwjustdoit](https://github.com/wzwjustdoit) | PR #178 DSH 身份句脱敏（R115），含完整直发实测矩阵 |
+
+---
+
+# wild-work v2.9.5
+
+会话头族（`X-Conversation-*`）按官方三层语义分层，**国内版补齐 `X-Conversation-ID`**；
+`11128 conversation id missing` 由「内容拦截」改为账号级软冷却。对应决议 **R116**
+（同时修订 R71 的「会话级 id 每请求现生成」口径）。
+
+## 🔑 国内版不再裸奔：补齐会话头族（R116）
+
+国内版 `workbuddy` 此前**一个 `X-Conversation-*` 都不发**——国际版 2026-10-16 起已按账号
+灰度校验会话头族（缺 `X-Conversation-ID` 即 `400 code=11128`），国内版 10-20 夜里跟着上了
+同一套校验，本仓却是 GitHub 五个独立实现里唯一「国际发、国内不发」的一家。
+
+现在两个区共用一份 ID 生成器 `internal/wbid`，语义按官方 5.8.4 抓包分三层：
+
+| 头 | 层级 | 取值 |
+|---|---|---|
+| `X-Conversation-ID` | 会话级 | 同一次会话恒定（UUIDv4 形态，掺账号派生） |
+| `X-Conversation-Request-ID` | 轮级 | 一次 user send 一个，工具回调/重试/换号复用 |
+| `X-Conversation-Message-ID` | 调用级 | 每次上游请求新生成（= `X-Request-ID`） |
+| `X-Root-Request-ID` | — | = 本轮的 `X-Conversation-Request-ID` |
+
+会话锚点取首条 user 消息文本、轮锚点取末条 user 消息文本：工具回调只追加 assistant/tool
+消息，末条 user 不变 ⇒ 一轮多步复用同一个轮 id，与官方行为一致。
+
+## 🧩 国际版：四个头不再绑成同一个值
+
+国际版旧实现把 `X-Conversation-ID` 每请求现生成 UUID、其余三个复用同一个 32hex。
+上游把 `X-Conversation-Request-ID` 当作「一次 user send = 一次请求」的计数键，
+每请求新值等于把一次多轮对话拆成上千个一次性会话——反作弊视角下最明显的非人类形态
+（workbuddy2api-hub#381 原文）。现在会话 id 稳定派生，轮 id 跨重试复用。
+
+## 🛡 `11128 conversation id missing` 归账号级
+
+同一个 `11128` 有两种形态，处置相反，现在按 `msg` 区分：
+
+- `conversation id missing` → `ErrAccountFault`（软冷却 + 换号）：按账号灰度，属账号级问题；
+- `Illegal API invocation from an unapproved channel` → `ErrContentBlocked`（不罚号）：
+  请求级内容指纹问题，改提示词就能过（见 R115 的 DSH 身份句）。
+
+此前两者都归内容拦截，被灰度账号会「显示健康、每次选中都失败」（manager#193 实录：
+14 个号里 7 个被拦死、只有 2 个被禁用）。
+
+## 🧪 实测与回归
+
+`deepseek-v4.1-flash` 两区各 12 次请求（非流式 / 流式 / 并发 6 / 并发 8 / 9k 长上下文 /
+tool call）：全部 `200`，**0 rotate、0×429、0×11128**，积分消耗 0；延迟无回退
+（国际 1.1–1.6s、国内 1.4–2.0s）。
+
+新增 `internal/wbid/id_test.go`（两层锚点语义、形态、账号隔离）、国内版
+`internal/upstream/conversation_headers_test.go`（含「账单/刷新端点不得携带会话头族」的
+爆炸半径断言）、重写国际版 `conversation_headers_test.go`，两区 `TestClassify` 各补
+`11128` 双形态用例。`go build ./... && go vet ./... && go test ./...` 全绿。

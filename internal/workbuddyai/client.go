@@ -4,9 +4,7 @@ package workbuddyai
 
 import (
 	"bytes"
-	crand "crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +17,7 @@ import (
 	"wild-work/internal/auth"
 	"wild-work/internal/idle"
 	"wild-work/internal/provider"
+	"wild-work/internal/wbid"
 )
 
 // Client 国际版上游 HTTP 客户端。Base 可覆盖以便测试。
@@ -95,7 +94,11 @@ func commonHeaders(req *http.Request) {
 // 官方客户端 5.8.4 抓包核验）、CangShui/workbuddy-gateway#20、
 // ithtelab/workbuddy-manager#193。实测只在 body 加 conversationId 无效，
 // 头族才是校验对象（#193）。
-func chatHeaders(req *http.Request, a *auth.Auth) {
+//
+// conv / turn 来自 wbid.Anchors（会话级 / 轮级锚点），三层语义见 internal/wbid：
+// 会话 id 同会话恒定、轮 id 一次 user send 一个值（重试与换号复用）、
+// 调用 id 每请求新生成。锚点为空时退回随机（历史行为）。
+func chatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
 	commonHeaders(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
@@ -111,15 +114,20 @@ func chatHeaders(req *http.Request, a *auth.Auth) {
 	}
 	req.Header.Set("X-Domain", wbaiDomain)
 	injectAttributionWBAI(req)
-	// 会话头族。X-Conversation-ID 在官方客户端抓包里是带连字符的 UUID
-	// （v4/v7 均被接受，版本号不参与校验）；其余四个此前已带（32 位 hex），
-	// 形态保持不变。每次请求现生成（对齐 #381 合并版行为，不引入跨请求状态）。
-	req.Header.Set("X-Conversation-ID", conversationIDWBAI())
-	mid := newMessageIDWBAI()
-	req.Header.Set("X-Conversation-Request-ID", mid)
-	req.Header.Set("X-Conversation-Message-ID", mid)
-	req.Header.Set("X-Request-ID", mid)
-	req.Header.Set("X-Root-Request-ID", mid)
+	// 会话头族按三层语义分层（见 internal/wbid）：
+	//	X-Conversation-ID         会话级（带连字符 UUID，官方抓包形态）
+	//	X-Conversation-Request-ID 轮级（32 hex，工具回调/重试/换号复用）
+	//	X-Conversation-Message-ID 调用级（32 hex，每次上游请求新生成）
+	//	X-Root-Request-ID       = 本轮 Request-ID（官方主对话同形）
+	// 旧实现把四个头绑成同一个值且每请求现生成，等于把一次多轮对话拆成上千个
+	// 一次性会话——hub#381 明确指出这是反作弊视角下最明显的非人类形态（R116）。
+	msgID := wbid.MessageID()
+	turnID := wbid.TurnID(a.UID, conv, turn)
+	req.Header.Set("X-Conversation-ID", wbid.ConversationID(a.UID, conv))
+	req.Header.Set("X-Conversation-Request-ID", turnID)
+	req.Header.Set("X-Conversation-Message-ID", msgID)
+	req.Header.Set("X-Request-ID", msgID)
+	req.Header.Set("X-Root-Request-ID", turnID)
 }
 
 func injectAttributionWBAI(req *http.Request) {
@@ -128,37 +136,6 @@ func injectAttributionWBAI(req *http.Request) {
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
 	req.Header.Set("X-IDE-Version", "5.5.4")
 	req.Header.Set("X-Product", "WorkBuddy")
-}
-
-func newMessageIDWBAI() string {
-	var b [16]byte
-	n := time.Now().UnixNano()
-	for i := 0; i < 8; i++ {
-		b[i] = byte(n >> (i * 8))
-		b[15-i] = byte(n >> ((7 - i) * 8))
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// conversationIDWBAI 生成 X-Conversation-ID 的值：随机 UUIDv4（带连字符，
-// 8-4-4-4-12 小写 hex）。官方客户端抓包显示 conversation id 就是这个形态，
-// v4/v7 均被上游接受（#381 实测版本号不参与校验），取实现最简的 v4。
-// 与 newMessageIDWBAI 的 32 位 hex 刻意不同形——两种形态在抓包里并存，
-// 分别对应消息类与会话类 ID，保持各自原貌最不惹眼。
-func conversationIDWBAI() string {
-	var b [16]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		// crypto/rand 失败时退回时间戳派生（与 newMessageIDWBAI 同源思路），
-		// 仍满足「带连字符 UUID」的形态校验。
-		n := time.Now().UnixNano()
-		for i := 0; i < 8; i++ {
-			b[i] = byte(n >> (i * 8))
-			b[15-i] = byte(n >> ((7 - i) * 8))
-		}
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // billingHeaders 余额 / 签到接口头。
@@ -285,10 +262,11 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // `retry_policy.retry=true` 或 `actions` 含 `RETRY` 的 429**（14003 瞬时拥塞）：
 // 上游自己说可重试，此时直接抛错并让上层罚号，会把一次可自愈的抖动放大成渠道级 503。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	conv, turn := wbid.Anchors(body)
 	prepared := PrepareBody(body)
 	rateLimitRetries := 0
 	for attempt := 1; attempt <= retryMaxAttempts; attempt++ {
-		rc, status, respBody, err = c.chatStreamOnce(a, prepared)
+		rc, status, respBody, err = c.chatStreamOnce(a, prepared, conv, turn)
 		ok, isRateLimit := retryDecision(status, respBody, err)
 		if !ok {
 			return rc, status, respBody, err
@@ -321,12 +299,12 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 }
 
 // chatStreamOnce 单次对话请求（不做重试）。
-func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+func (c *Client) chatStreamOnce(a *auth.Auth, prepared []byte, conv, turn string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.base()+EpChat, bytes.NewReader(prepared))
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	chatHeaders(req, a)
+	chatHeaders(req, a, conv, turn)
 	req, cancel := idle.WithCancel(req)
 	hc := c.HTTP
 	if c.StreamHTTP != nil {

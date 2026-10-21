@@ -6,9 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
-	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/wbid"
 )
 
 const (
@@ -41,7 +41,10 @@ func CommonHeaders(req *http.Request, a *auth.Auth) {
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
-func ChatHeaders(req *http.Request, a *auth.Auth) {
+//
+// conv / turn 是 wbid.Anchors 抽出的会话锚点（国内版此前完全不发 X-Conversation-ID，
+// 属单边裸奔 —— 见 R116）；锚点为空时退回每请求随机，行为与历史一致。
+func ChatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
 	CommonHeaders(req, a)
 	if at := a.AccessTokenValue(); at != "" {
 		req.Header.Set("Authorization", "Bearer "+at)
@@ -65,7 +68,7 @@ func ChatHeaders(req *http.Request, a *auth.Auth) {
 		req.Header.Set("X-No-Department-Info", "1")
 	}
 	injectAttribution(req, a)
-	injectConversationHeaders(req, newMessageID())
+	injectConversationHeaders(req, a, conv, turn)
 }
 
 // BillingHeaders billing 接口请求头。
@@ -106,26 +109,26 @@ func injectAttribution(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Product", "WorkBuddy")
 }
 
-// injectConversationHeaders 注入会话头族（X-Conversation-Request-ID / B3 链路）。
-func injectConversationHeaders(req *http.Request, messageID string) {
-	cid := newMessageID()
-	req.Header.Set("X-Conversation-Request-ID", cid)
-	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", messageID)
-	req.Header.Set("X-Root-Request-ID", cid)
-	req.Header.Set("X-B3-TraceId", messageID)
-	req.Header.Set("X-B3-SpanId", messageID[:16])
-	req.Header.Set("X-B3-Sampled", "1")
-}
-
-func newMessageID() string {
-	var b [16]byte
-	n := time.Now().UnixNano()
-	for i := 0; i < 8; i++ {
-		b[i] = byte(n >> (i * 8))
-		b[15-i] = byte(n >> ((7 - i) * 8))
+// injectConversationHeaders 注入会话头族（X-Conversation-* / B3 链路）。
+//
+// 语义与形态见 internal/wbid：会话级恒定、轮级一次 user send（工具回调/重试复用）、
+// 调用级每请求新生成；X-Root-Request-ID 取本轮 id（官方主对话同形）。
+// B3 是每请求链路头，仍跟调用级 id 走。
+func injectConversationHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
+	uid := ""
+	if a != nil {
+		uid = a.UID
 	}
-	return hex.EncodeToString(b[:])
+	msgID := wbid.MessageID()
+	turnID := wbid.TurnID(uid, conv, turn)
+	req.Header.Set("X-Conversation-ID", wbid.ConversationID(uid, conv))
+	req.Header.Set("X-Conversation-Request-ID", turnID)
+	req.Header.Set("X-Conversation-Message-ID", msgID)
+	req.Header.Set("X-Request-ID", msgID)
+	req.Header.Set("X-Root-Request-ID", turnID)
+	req.Header.Set("X-B3-TraceId", msgID)
+	req.Header.Set("X-B3-SpanId", msgID[:16])
+	req.Header.Set("X-B3-Sampled", "1")
 }
 
 func acceptLanguageFor(a *auth.Auth) string {

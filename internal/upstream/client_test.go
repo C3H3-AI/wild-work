@@ -40,6 +40,11 @@ func TestClassify(t *testing.T) {
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
 		// 401 统一归登录态失效（#134）：上游拒绝我们的凭据 = 需重新登录
 		{401, `{"code":9999,"msg":"bad token"}`, ErrSessionDead},
+		// 会话头族缺失（11128 conversation id missing）= 上游**按账号灰度**的渠道校验，
+		// 归账号级（软冷却 + 换号，见 R116）；同一个 11128 的另一形态（内容指纹
+		// unapproved channel）才是请求级问题，归内容拦截不罚号。
+		{400, `{"code":11128,"msg":"conversation id missing","requestId":"x"}`, ErrAccountFault},
+		{400, `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`, ErrContentBlocked},
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
