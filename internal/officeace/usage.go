@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"wild-work/internal/auth"
+	"wild-work/internal/provider"
 )
 
 // 云端「按日消耗」（积分 + Token）。
@@ -39,6 +41,9 @@ type UsageBucket struct {
 
 // SubscriptionUsageDaily 拉取云端按日消耗（上游给出多少天就返回多少天）。
 // 与 UserResource 同纪律：**失败一律上抛**，绝不返回零值假装「今天没消耗」。
+//
+// 输出契约（给 ledger / 面板消费，务必确定）：**按 Day 升序**、**同一自然日已合并为一条**，
+// 上游若把一天拆成多条（分页残留 / 同 sku 多次回补）不会让消费方重复计数。
 func (c *Client) SubscriptionUsageDaily(a *auth.Auth) ([]UsageBucket, error) {
 	ac := c.ensureCredential(a)
 	return c.subscriptionUsageDaily(ac)
@@ -65,7 +70,14 @@ func (c *Client) subscriptionUsageDaily(ac *Account) ([]UsageBucket, error) {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("officeace: usage HTTP %d: %s", status, truncate(body, 200))
+		// 不变量 19：上游 ≥400 必须回类型化 *provider.Error，裸 fmt.Errorf 会让调用方
+		// errors.As 取不到 Kind ⇒ 将来接上 ledger/app 刷新路径时 401 自愈永不生效。
+		// 本渠道 401/403 归 ErrAccountFault（见 classifyUpstream 注释），不会误 Disable 账号。
+		return nil, &provider.Error{
+			Kind:   classifyUpstream(status, string(body)),
+			Status: status,
+			Msg:    fmt.Sprintf("officeace: usage HTTP %d: %s", status, truncate(body, 200)),
+		}
 	}
 	var resp usageResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -86,7 +98,27 @@ func (c *Client) subscriptionUsageDaily(ac *Account) ([]UsageBucket, error) {
 		}
 		out = append(out, b)
 	}
-	return out, nil
+	return mergeUsageBuckets(out), nil
+}
+
+// mergeUsageBuckets 按自然日合并并升序排序（同一天多条 ⇒ 积分/token 相加，只留一条）。
+func mergeUsageBuckets(in []UsageBucket) []UsageBucket {
+	byDay := make(map[string]*UsageBucket, len(in))
+	for _, b := range in {
+		if p := byDay[b.Day]; p != nil {
+			p.Points += b.Points
+			p.Tokens += b.Tokens
+			continue
+		}
+		cp := b
+		byDay[b.Day] = &cp
+	}
+	out := make([]UsageBucket, 0, len(byDay))
+	for _, p := range byDay {
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
+	return out
 }
 
 // pickUsageDay 从日桶里挑出指定北京自然日；缺失时返回该日的零值桶。
@@ -100,12 +132,24 @@ func pickUsageDay(buckets []UsageBucket, day string) UsageBucket {
 }
 
 // usageDayOf 把上游 created_at（北京当日 00:00 的 UTC 表示）换算成北京自然日。
+//
+// 两种形态都要吃得住：实测下发 ISO 串（`2026-10-20T16:00:00.000Z`），但 numStr 已声明
+// 本渠道同族接口偶有**数字**形式（epoch 毫秒/秒）——旧实现只走 parseISO，一旦 created_at
+// 真回成数字，parseISO 失败 ⇒ 整桶被静默丢弃（与 numStr 的兼容声明自相矛盾）。
+// 13 位按毫秒、10 位按秒判，其余长度不猜（回 "" 交给上层丢弃）。
 func usageDayOf(s string) string {
-	t, ok := parseISO(s)
-	if !ok {
-		return ""
+	if ms, ok := parseISO(s); ok {
+		return time.UnixMilli(ms).In(expireLoc).Format("2006-01-02")
 	}
-	return time.UnixMilli(t).In(expireLoc).Format("2006-01-02")
+	if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil && n > 0 {
+		switch {
+		case n >= 1_000_000_000_000: // epoch 毫秒
+			return time.UnixMilli(n).In(expireLoc).Format("2006-01-02")
+		case n >= 1_000_000_000: // epoch 秒
+			return time.Unix(n, 0).In(expireLoc).Format("2006-01-02")
+		}
+	}
+	return ""
 }
 
 func atofSafe(s string) float64 {
