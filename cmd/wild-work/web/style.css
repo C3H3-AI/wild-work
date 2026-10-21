@@ -555,6 +555,29 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 }
 .fees .full-id:hover { color: var(--primary); background: #e0e7ff; }
 
+/* 自定义渠道的「接入点 / api-key」行（R119）：费率页被当模型接入点总表用，
+   每个自定义渠道在自己的模型表前占一行，两段都可点复制。
+   key 常态只显脱敏串，明文由点下去那一刻另走接口取，不随费率批量下发。 */
+.fee-access {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin: 2px 0 8px; padding: 6px 10px;
+  background: #f8fafc; border: 1px solid var(--border); border-radius: 8px;
+}
+.fee-access-k { font-size: 11px; color: var(--muted); flex: none; }
+.fee-access-v {
+  font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: var(--text);
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  padding: 1px 7px; cursor: pointer; line-height: 1.6;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fee-access-v:hover { color: var(--primary); border-color: var(--primary); background: #e0e7ff; }
+
+/* 能力来源徽标（R119）：上游声明 / 面板手填 / 未探测 三态。
+   复用于自定义模型列表、模型管理行、导入勾选行，颜色走项目设计令牌不在两处写死。 */
+.cap-api { color: var(--ok); font-weight: 600; }
+.cap-user { color: var(--warn); }
+.cap-unknown { color: var(--muted); border-bottom: 1px dotted var(--muted); cursor: help; }
+
 /* 配置说明 */
 .docs { font-size: 13px; }
 .docs p { margin-bottom: 8px; }

@@ -6,8 +6,10 @@
 //
 // 原则（用户裁定）：
 //   - 配什么，/v1/models 就返回什么；
-//   - 绝不向上游 GET /models 发起拉取；
-//   - 绝不做任何启发式推测。
+//   - 运行期路由绝不向上游 GET /models 发起拉取（只有面板上用户主动点「导入」
+//     才探一次，见 probe.go 的 TestConnection）；
+//   - 绝不做任何启发式推测：能力字段只记「谁说的」（CapSource），上游没声明、
+//     用户也没填的一律留「未探测」，不得拿默认值冒充声明。
 package custom
 
 import (
@@ -24,7 +26,7 @@ import (
 
 var channelNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
-// ModelConfig 单个模型详细配置（配什么返回什么，不推测，不上游拉取）。
+// ModelConfig 单个模型详细配置（配什么返回什么，运行期不推测）。
 type ModelConfig struct {
 	ID                     string   `json:"id"`
 	ContextWindow          int64    `json:"context_window,omitempty"`           // 上下文大小（tokens），0 = 未设置
@@ -34,6 +36,28 @@ type ModelConfig struct {
 	SupportsTools          *bool    `json:"supports_tools,omitempty"`           // 工具/函数调用（nil = 未声明 ⇒ 默认 true；指针以保留显式 false，否则 omitempty 会把 false 丢掉）
 	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`        // 思考档位，如 ["low", "medium", "high"]
 	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"` // 默认思考档位，如 "high"
+	// CapSource 上面这些能力字段的**来源**："api"=上游 /models 声明、"user"=面板手填、
+	// ""/"unknown"=未探测。为什么要落盘：导入时把「1M/64k/全能力」这类猜测值当声明写死，
+	// 面板与 /v1/models 就会把「不知道」冒充成「上游说的」（R49 同款纪律）。
+	// 有来源才能如实标注，用户也才能只校正「未探测」的那些。
+	// 零值 = 未探测 ⇒ 老配置（无此字段）行为不变，符合不变量 5（只增不减）。
+	CapSource string `json:"cap_source,omitempty"`
+}
+
+// CapFromAPI 能力字段是否来自上游声明（面板据此标「上游」、/v1/models 据此置 ContextFromAPI）。
+func (m ModelConfig) CapFromAPI() bool { return m.CapSource == CapSourceAPI }
+
+// CapFromUser 能力字段是否用户在面板手填（面板据此标「手填」，与「上游」「实测」区分）。
+func (m ModelConfig) CapFromUser() bool { return m.CapSource == CapSourceUser }
+
+// HasAnyCap 是否有任何确定的能力/容量信息（含只填了上下文的情形）——
+// 「未探测」的后端口径（前端目前直接看 cap_source，两者得一致）。
+// 注意：SupportsTools 只数「显式 false」——解析层给缺省也补 true（简写形态不会落成
+// 「不支持工具」，见 UnmarshalJSON 注释），若把 nil/true 也算「已探测」，
+// `"models":["id"]` 这种只填了 ID 的老配置会被当成有能力信息。
+func (m ModelConfig) HasAnyCap() bool {
+	return m.ContextWindow > 0 || m.MaxTokens > 0 || m.SupportsImages || m.SupportsReasoning ||
+		(m.SupportsTools != nil && !*m.SupportsTools) || len(m.ReasoningEfforts) > 0 || m.DefaultReasoningEffort != ""
 }
 
 // boolPtr 返回 bool 的指针（用于区分三态：nil = 未声明，取默认）。
@@ -107,6 +131,7 @@ func (m *ModelConfig) UnmarshalJSON(data []byte) error {
 		SupportsTools          *bool           `json:"supports_tools,omitempty"`
 		ReasoningEfforts       []string        `json:"reasoning_efforts,omitempty"`
 		DefaultReasoningEffort string          `json:"default_reasoning_effort,omitempty"`
+		CapSource              string          `json:"cap_source,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -117,6 +142,7 @@ func (m *ModelConfig) UnmarshalJSON(data []byte) error {
 	m.SupportsTools = raw.SupportsTools
 	m.ReasoningEfforts = raw.ReasoningEfforts
 	m.DefaultReasoningEffort = raw.DefaultReasoningEffort
+	m.CapSource = strings.TrimSpace(raw.CapSource)
 
 	// 单位串解析失败不吞错：把错误往上抛，让配置层 normalize() 报「哪一条渠道的哪个字段
 	// 写错了」，而不是静默落成 0（= 未设置）——否则用户输错单位后会看到「上下文未知」
@@ -187,6 +213,13 @@ func (c *ChannelConfig) Validate() error {
 	seen := map[string]bool{}
 	for _, m := range c.Models {
 		m.ID = strings.TrimSpace(m.ID)
+		// 来源字段只接受三个枚举值，缺失/写错的一律归「未探测」（不得因为脏数据而谎称「上游声明」）。
+		// 简写形态（models:["id"]）本就没得源可标，同样落这里 ⇒ 前端统一看到「未探测」。
+		switch m.CapSource {
+		case CapSourceAPI, CapSourceUser:
+		default:
+			m.CapSource = CapSourceUnknown
+		}
 		if m.ID != "" && !seen[m.ID] {
 			seen[m.ID] = true
 			cleanModels = append(cleanModels, m)

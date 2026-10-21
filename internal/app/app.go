@@ -2713,6 +2713,19 @@ func (a *App) resolveCustomKey(name string) string {
 	return ""
 }
 
+// customChannelFeesMeta 返回渠道名 -> [接入点, 脱敏 key]，只给费率页用（R119）。
+// 这里给的必须是 maskKey 后的脱敏串：费率页会被面板反复拉，批量发明文等于
+// 把所有第三方 key 长期暴露在浏览器内存/抓包里。
+func (a *App) customChannelFeesMeta() map[string][2]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make(map[string][2]string, len(a.cfg.CustomChannels))
+	for _, cc := range a.cfg.CustomChannels {
+		out[cc.Name] = [2]string{cc.BaseURL, maskKey(cc.APIKey)}
+	}
+	return out
+}
+
 // maskCustomChannels 返回配置的深拷贝，并将 api_key 脱敏（非空时仅露首 3 + 尾 4）。
 // 脱敏串保留 「…」 标记，供 SetCustomChannels 识别「未改动」。
 func maskCustomChannels(in []custom.ChannelConfig) []custom.ChannelConfig {
@@ -3779,12 +3792,40 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			req.APIKey = a.resolveCustomKey(req.Name)
 		}
 		client := custom.New(req)
-		models, err := client.TestConnection()
+		// 除纯 ID 外还回能力清单（R119）：前端勾选导入时直接拿这些字段写配置。
+		// 上游没声明的字段保持零值/nil ⇒ 前端标「未探测」，绝不拿 1M/64k 这类猜测值冒充上游声明（R49 同口径）。
+		caps, err := client.TestConnection()
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": models})
+		ids := make([]string, 0, len(caps))
+		for _, c := range caps {
+			ids = append(ids, c.ID)
+		}
+		// models 保持旧形状（[]string），不破既有契约；caps 是新增维度。
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": ids, "caps": caps})
+	})
+	// 面板「点击复制 api-key」：明文按需单条下发，不随渠道列表/费率接口批量返回
+	//（否则每次刷新面板都把全部 key 送进浏览器，抓包/历史里全都是）。
+	// 口径说明：自定义渠道的 key 是**用户自己填的第三方凭据**，不是本工具的上游会话 token
+	//（不变量 2 管的是后者），且本端点同其它 /api/* 一样受 cookie 会话鉴权约束（R4）。
+	// 日志只记渠道名，绝不落 key 本身。
+	mux.HandleFunc("POST /api/config/custom_channel_key", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			apiError(w, http.StatusBadRequest, "解析请求失败："+err.Error())
+			return
+		}
+		key := a.resolveCustomKey(req.Name)
+		if key == "" {
+			apiError(w, http.StatusNotFound, fmt.Sprintf("自定义渠道 %s 不存在或未配置 api key", req.Name))
+			return
+		}
+		log.Printf("已下发自定义渠道 %s 的 api_key 明文（面板复制）", req.Name)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "api_key": key})
 	})
 	mux.HandleFunc("POST /api/account/nickname", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -3917,6 +3958,11 @@ func clientIP(r *http.Request) string {
 type feesChannel struct {
 	Channel string         `json:"channel"`
 	Models  []feesModelRow `json:"models"`
+	// BaseURL/APIKeyMasked 仅自定义渠道填写（R119）：面板把费率页当「模型接入点总表」用，
+	// 需要在一处看全每个模型的 endpoint 与 key。key 始终是**脉敏值**（maskKey），明文由前端点「复制」
+	// 时另走 POST /api/config/custom_channel_key 按需取，不随本接口批量下发。
+	BaseURL      string `json:"base_url,omitempty"`
+	APIKeyMasked string `json:"api_key_masked,omitempty"`
 }
 
 // feesModelRow 一行模型：来自渠道 models 列表，尽可能配上费率。
@@ -3944,6 +3990,10 @@ type feesModelRow struct {
 	MaxTokens     int64 `json:"max_tokens,omitempty"`
 	// HandMeasured 标记上述上下文值是**本工具实测**（非上游声明），前端据此加「实测」标注。
 	HandMeasured bool `json:"hand_measured,omitempty"`
+	// CapSource 能力/上下文数据的来源，供前端逐行如实标注（R119）：
+	// "api"=上游声明、"measured"=本工具实测、"user"=面板手填、""=未声明（前端显「未探测」）。
+	// 只影响展示文案，不影响路由；与自定义渠道配置里的 cap_source 同源。
+	CapSource string `json:"cap_source,omitempty"`
 	// 能力标记（与 /v1/models 同源），供 UI 在模型 ID 后展示图标。
 	SupportsImages    bool `json:"supports_images"`
 	SupportsReasoning bool `json:"supports_reasoning"`
@@ -4013,8 +4063,9 @@ func buildFeesChannels(modelsByKind map[provider.Kind][]provider.ModelInfo,
 				// 仅上游接口返回的上下文可信；硬编码估算值不展示数字。
 				// 上游声明（API）或本工具手工实测均视为「有上下文可展示」；
 				// 前端据 hand_measured 区分并加「实测」标注，不把实测冒充成官方值。
-				HasContext:   mi.ContextFromAPI || mi.HandMeasured,
+				HasContext:   mi.ContextFromAPI || mi.HandMeasured || mi.ContextFromUser,
 				HandMeasured: mi.HandMeasured,
+				CapSource:    capSourceOf(mi),
 				// 能力标记与 /v1/models 同源，保证 UI 图标与接口声明一致。
 				SupportsImages:    mi.SupportsImages,
 				SupportsReasoning: mi.SupportsReasoning,
@@ -4086,6 +4137,7 @@ func (a *App) FeesInfo() map[string]any {
 	// 这与 /v1/models、用量流水、运行统计的可见性不一致。按渠道名排序保证稳定顺序。
 	order := feeChannelOrderWithDynamic(modelsByKind)
 	channels := buildFeesChannels(modelsByKind, cached, order)
+	a.applyCustomFeesMeta(&channels)
 
 	result := map[string]any{
 		"note":       "本表以各渠道实际可用模型列表为准；倍率为空的模型表示上游未返回定价（未知）。",
@@ -4101,12 +4153,52 @@ func (a *App) FeesInfo() map[string]any {
 	return result
 }
 
+// capSourceOf 把 ModelInfo 的三个互斥来源位归成一个字符串，给面板逐行标注（R119）。
+// 优先级 api > measured > user：同时置位时以最权威的为准（与 provider.ModelInfo 注释一致）。
+func capSourceOf(mi provider.ModelInfo) string {
+	switch {
+	case mi.ContextFromAPI:
+		return "api"
+	case mi.HandMeasured:
+		return "measured"
+	case mi.ContextFromUser:
+		return "user"
+	}
+	return ""
+}
+
+// applyCustomFeesMeta 给费率表里的自定义渠道补上接入点与脉敏 key（R119）。
+// 抽成方法而不是内联在 FeesInfo：单测要能单独证「明文没进来、脉敏串进来了」。
+// 内建渠道的 endpoint 写死在代码里，无需展示 ⇒ meta 表不命中就保持空串。
+func (a *App) applyCustomFeesMeta(channels *[]feesChannel) {
+	meta := a.customChannelFeesMeta()
+	if len(meta) == 0 {
+		return
+	}
+	for i := range *channels {
+		if m, ok := meta[(*channels)[i].Channel]; ok {
+			(*channels)[i].BaseURL = m[0]
+			(*channels)[i].APIKeyMasked = m[1]
+		}
+	}
+}
+
 // staticModelFallback 无 handler 时的渠道→静态模型表兜底。
-// app.Runtime 不带静态表（那是 server.Runtime 的字段），故此处返回空，
-// 由 buildFeesChannels 自行跳过无模型的渠道；
-// 实际运行中 handler 总是已注入（SetHandler），不会走到这里。
+// app.Runtime 不带静态表（那是 server.Runtime 的字段），但**自定义渠道例外**：
+// 它的 FetchModels 是「配什么返回什么」，绝不发网络请求（R66，已有测试锁死），
+// 因此可以在此安全取回——否则启动早期/单测里费率页拿不到自定义渠道的行。
+// 内建渠道的目录接口会打上游，绝不在这里调 ⇒ 非 Custom 渠道仍返回空。
 func (a *App) staticModelFallback() map[provider.Kind][]provider.ModelInfo {
-	return map[provider.Kind][]provider.ModelInfo{}
+	out := map[provider.Kind][]provider.ModelInfo{}
+	for _, rt := range a.runtimesSnapshot() {
+		if rt == nil || !rt.Custom || rt.Upstream == nil {
+			continue
+		}
+		if ms, err := rt.Upstream.FetchModels(nil); err == nil && len(ms) > 0 {
+			out[rt.Kind] = ms
+		}
+	}
+	return out
 }
 
 // RefreshPricing 从所有已接入渠道拉取最新定价并更新缓存。

@@ -596,10 +596,11 @@
     <div class="modal-body">
       <div class="cfg-row"><label class="cfg-label">模型 ID</label>
         <input id="meId" class="input grow" placeholder="如 glm-5.3" spellcheck="false"></div>
+      <div class="hint" id="meCapSrc" style="margin:-2px 0 6px"></div>
       <div class="cfg-row"><label class="cfg-label">上下文</label>
-        <input id="meCtx" class="input grow" placeholder="如 1M / 128k / 200000" value="1M" spellcheck="false"></div>
+        <input id="meCtx" class="input grow" placeholder="留空=未探测；可填 1M / 128k / 200000" spellcheck="false"></div>
       <div class="cfg-row"><label class="cfg-label">最大输出</label>
-        <input id="meOut" class="input grow" placeholder="如 64k" value="64k" spellcheck="false"></div>
+        <input id="meOut" class="input grow" placeholder="留空=未探测；可填 64k" spellcheck="false"></div>
       <div class="cfg-row"><label class="cfg-label">思考档位</label>
         <input id="meEff" class="input grow" placeholder="如 low, high（逗号分隔，留空=无思考）" spellcheck="false"></div>
       <div class="cfg-row"><label class="cfg-label">能力</label>

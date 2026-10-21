@@ -314,3 +314,209 @@ func TestCustomChannelTestEndpointResolvesMaskedKey(t *testing.T) {
 		t.Fatalf("端点应用真实密钥而非脱敏值，got %q", gotAuth)
 	}
 }
+
+// TestCustomChannelTestEndpointReturnsCaps 「导入/测试」端点除纯 ID 外还要回能力清单（R119）：
+// 前端勾选导入时靠 caps 写配置，拿不到的字段必须留空（而不是让前端补 1M/64k 那种猜测值）。
+// models 字段保持旧形状（[]string），不破既有契约。
+func TestCustomChannelTestEndpointReturnsCaps(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.StateFile = tmpDir + "/state.json"
+	cfgPath := tmpDir + "/config.json"
+	_ = config.Save(cfg, cfgPath)
+	a, err := New(Options{ConfigPath: cfgPath, Config: cfg, Runtimes: map[provider.Kind]*Runtime{}})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer a.Close()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+		  {"id":"with-cap","context_window":1048576,"max_tokens":65536,"supported_parameters":["tools","reasoning"]},
+		  {"id":"bare","object":"model","owned_by":"someone"}]}`))
+	}))
+	defer ts.Close()
+
+	mux := http.NewServeMux()
+	a.HandleAPI(mux)
+	body, _ := json.Marshal(map[string]any{"name": "t1", "base_url": ts.URL, "api_key": "sk-x"})
+	req := httptest.NewRequest("POST", "/api/config/custom_channel_test", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		OK     bool              `json:"ok"`
+		Models []string          `json:"models"`
+		Caps   []custom.ModelCap `json:"caps"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应形状变了（models 必须仍是 []string）: %v — %s", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Models) != 2 || resp.Models[0] != "with-cap" {
+		t.Fatalf("models 回退形状不符: %s", w.Body.String())
+	}
+	if len(resp.Caps) != 2 {
+		t.Fatalf("caps 数 = %d, want 2", len(resp.Caps))
+	}
+	byID := map[string]custom.ModelCap{}
+	for _, c := range resp.Caps {
+		byID[c.ID] = c
+	}
+	got := byID["with-cap"]
+	if got.ContextWindow != 1048576 || got.MaxTokens != 65536 || got.CapSource != custom.CapSourceAPI {
+		t.Fatalf("能力字段没解析出来：%+v", got)
+	}
+	if got.SupportsTools == nil || !*got.SupportsTools {
+		t.Fatalf("supported_parameters 里的 tools 应命中：%+v", got)
+	}
+	bare := byID["bare"]
+	if bare.CapSource != "" || bare.ContextWindow != 0 {
+		t.Fatalf("无能力字段的上游被填了猜测值：%+v", bare)
+	}
+}
+
+// TestCustomChannelKeyRevealEndpoint 点「复制 key」才下发的那条接口（R119）：
+// ① 明文只在被点名时回一次；② 未知渠道报错；③ 渠道列表/费率载荷里绝不得出现明文。
+func TestCustomChannelKeyRevealEndpoint(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.StateFile = tmpDir + "/state.json"
+	cfgPath := tmpDir + "/config.json"
+	_ = config.Save(cfg, cfgPath)
+	a, err := New(Options{ConfigPath: cfgPath, Config: cfg, Runtimes: map[provider.Kind]*Runtime{}})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer a.Close()
+
+	const realKey = "sk-reveal-secret-0123456789"
+	if err := a.SetCustomChannels([]custom.ChannelConfig{
+		{Name: "stepfun", BaseURL: "https://api.stepfun.com/v1", APIKey: realKey},
+	}); err != nil {
+		t.Fatalf("SetCustomChannels: %v", err)
+	}
+	mux := http.NewServeMux()
+	a.HandleAPI(mux)
+
+	post := func(path, body string) (int, string) {
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+
+	code, buf := post("/api/config/custom_channel_key", `{"name":"stepfun"}`)
+	if code != 200 || !strings.Contains(buf, realKey) {
+		t.Fatalf("按需取明文失败：%d %s", code, buf)
+	}
+	// 渠道名大小写不敏感（resolveCustomKey 口径）
+	if code, _ := post("/api/config/custom_channel_key", `{"name":"STEPFUN"}`); code != 200 {
+		t.Fatalf("渠道名应大小写不敏感，got %d", code)
+	}
+	if code, buf := post("/api/config/custom_channel_key", `{"name":"nobody"}`); code != 404 || strings.Contains(buf, realKey) {
+		t.Fatalf("未知渠道应 404 且不泄漏任何 key：%d %s", code, buf)
+	}
+
+	// 反面：列表类接口只给脱敏值
+	st, _ := json.Marshal(a.GetState())
+	if strings.Contains(string(st), realKey) {
+		t.Fatalf("/api/state 里出现明文 key")
+	}
+	feesBody, _ := json.Marshal(a.FeesInfo())
+	if strings.Contains(string(feesBody), realKey) {
+		t.Fatalf("/api/fees 里出现明文 key")
+	}
+}
+
+// TestFeesCarriesCustomAccessAndCapSource 费率页要能显示接入点 + 脱敏 key + 能力来源（R119）。
+// 故意走 FeesInfo() 全链路而不是单测 applyCustomFeesMeta：漏接调用点（只写了方法没调）
+// 必须当场变红，否则面板永远看不到接入点。明文不得出现、脱敏串必须出现，也在同一条里证。
+func TestFeesCarriesCustomAccessAndCapSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.Default()
+	cfg.StateFile = tmpDir + "/state.json"
+	cfgPath := tmpDir + "/config.json"
+	_ = config.Save(cfg, cfgPath)
+	a, err := New(Options{ConfigPath: cfgPath, Config: cfg, Runtimes: map[provider.Kind]*Runtime{}})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer a.Close()
+
+	const realKey = "sk-fees-secret-abcdefgh"
+	cc := custom.ChannelConfig{
+		Name: "stepfun", BaseURL: "https://api.stepfun.com/v1", APIKey: realKey,
+		Models: []custom.ModelConfig{
+			{ID: "step-5-preview", ContextWindow: 1048576, CapSource: custom.CapSourceAPI},
+			{ID: "handy", ContextWindow: 64000, CapSource: custom.CapSourceUser},
+			{ID: "dark"},
+		},
+	}
+	if err := a.SetCustomChannels([]custom.ChannelConfig{cc}); err != nil {
+		t.Fatalf("SetCustomChannels: %v", err)
+	}
+	// 模拟 main.go 装配：staticModelFallback 只认 Custom 渠道，不装配则费率页没有这一组
+	a.UpdateCustomRuntimes(map[provider.Kind]*Runtime{
+		provider.Kind("stepfun"): {Kind: provider.Kind("stepfun"), Pool: pool.New(tmpDir + "/state-custom.json"), Upstream: custom.New(cc), Custom: true},
+	})
+
+	raw, err := json.Marshal(a.FeesInfo())
+	if err != nil {
+		t.Fatalf("marshal FeesInfo: %v", err)
+	}
+	if strings.Contains(string(raw), realKey) {
+		t.Fatalf("费率载荷里出现明文 key：%s", raw)
+	}
+	var got struct {
+		Channels []feesChannel `json:"channels"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var wb, sf *feesChannel
+	for i := range got.Channels {
+		switch got.Channels[i].Channel {
+		case "stepfun":
+			sf = &got.Channels[i]
+		case "workbuddy":
+			wb = &got.Channels[i]
+		}
+	}
+	if sf == nil {
+		t.Fatalf("费率表里没有自定义渠道分组（staticModelFallback 未生效）：%s", raw)
+	}
+	if sf.BaseURL != "https://api.stepfun.com/v1" {
+		t.Fatalf("base_url = %q", sf.BaseURL)
+	}
+	if sf.APIKeyMasked == "" || !strings.Contains(sf.APIKeyMasked, "…") {
+		t.Fatalf("key 必须是脱敏串，got %q", sf.APIKeyMasked)
+	}
+	// 内建渠道不填（endpoint 写死在代码里，展示了也没意义）
+	if wb != nil && (wb.BaseURL != "" || wb.APIKeyMasked != "") {
+		t.Fatalf("内建渠道被填了接入点：%+v", *wb)
+	}
+	wantSrc := map[string]string{"step-5-preview": "api", "handy": "user", "dark": ""}
+	if len(sf.Models) != len(wantSrc) {
+		t.Fatalf("模型行数 = %d, want %d", len(sf.Models), len(wantSrc))
+	}
+	for _, m := range sf.Models {
+		want, ok := wantSrc[m.Model]
+		if !ok {
+			t.Fatalf("多出模型 %q", m.Model)
+		}
+		if m.CapSource != want {
+			t.Fatalf("%s 的来源标注 = %q, want %q", m.Model, m.CapSource, want)
+		}
+		// 无来源的那行不得把上下文当已知展示（前端 ctxTag 判 has_context）；
+		// 有来源的必须置 has_context，否则就是 bug1（自定义渠道上下文恒不显示）复发。
+		if want == "" && m.HasContext {
+			t.Fatalf("无来源的上下文被标成可展示：%+v", m)
+		}
+		if want != "" && !m.HasContext {
+			t.Fatalf("有来源的上下文却没置 has_context（bug1 复发）：%+v", m)
+		}
+	}
+}

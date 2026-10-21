@@ -1044,7 +1044,10 @@ for (const [label, re] of uniq) {
     // ---- 跟进项（PR #121：自定义渠道 UI 打磨，R66 延续）----
     ["模型新增走弹窗（R82：列表里不再内嵌添加行）", raw.includes('$("btnMgrAdd").onclick') && raw.includes("function openModelEditor(")],
     ["上下文/输出输入支持 k/M 单位（parseTokens）", raw.includes("function parseTokens(") && raw.includes("function formatTokenCount(")],
-    ["模型编辑弹窗默认值使用 1M / 64k 单位串", html.includes('id="meCtx"') && html.includes('value="1M"') && html.includes('value="64k"')],
+    // R119 推翻旧口径：输入框不再预填 1M/64k 这类猜测值——留空就是「未探测」，
+    // 面板绝不能把猜的冒充上游声明（同 R49「只透传声明」）。
+    ["模型编辑弹窗不预填猜测默认值（留空=未探测，R119）",
+      html.includes('id="meCtx"') && !/id="meCtx"[^>]*value="1M"/.test(html) && !/id="meOut"[^>]*value="64k"/.test(html)],
     ["模型编辑弹窗含工具能力勾选（supports_tools）", html.includes('id="meTools"') && raw.includes('supports_tools: $("meTools").checked')],
     ["渠道与模型列表都用一行式 flex 行（R82）", css.includes(".custom-ch-row {") && css.includes(".model-mgr-row {") && css.includes("white-space: nowrap")],
     ["openSettings 不再引用已移除的 inCustomModels", !raw.includes('$("inCustomModels")')],
@@ -1429,12 +1432,36 @@ for (const [label, re] of uniq) {
   check5("导入走既有 custom_channel_test 端点（不新增后端接口）",
     /openModelImport[\s\S]{0,600}?\/api\/config\/custom_channel_test/.test(raw));
   check5("已存在的模型不可勾选（避免重复导入）",
-    /exists: have\.has\(id\)/.test(raw) && /\$\{m\.exists \? " disabled" : ""\}/.test(raw));
+    /exists: have\.has\(/.test(raw) && /\$\{m\.exists \? " disabled" : ""\}/.test(raw));
   check5("导入只改编辑态、仍需「保存全部配置」落盘（不隐式写盘）",
     /confirmModelImport[\s\S]{0,900}?保存全部配置/.test(raw));
-  check5("导入的模型默认参数与手填输入框一致（1M/64k/三能力开）",
-    /context_window: 1000000, max_tokens: 64000/.test(raw) &&
-    /supports_images: true, supports_reasoning: true, supports_tools: true/.test(raw));
+  // R119：旧断言要求导入时写死 1M/64k + 三能力全开，那是**编造**上游没说的话，
+  // 已整体推翻。现在要求的是反面：拉到什么写什么，拉不到只存 ID。
+  check5("导入不再编造默认值（R119：无 1000000/64000 硬编码）",
+    !/context_window: 1000000/.test(raw) && !/supports_images: true, supports_reasoning: true, supports_tools: true/.test(raw));
+  check5("导入按 cap 写配置、无 cap 只存 ID（R119）",
+    /ch\.models\.push\(m\.cap \? capToModelConfig\(m\.cap\) : \{ id: m\.id \}\)/.test(raw));
+  check5("caps 字段直接进配置且带 cap_source（R119）",
+    /function capToModelConfig\(c\)[\s\S]{0,700}?rec\.cap_source = c\.cap_source/.test(raw));
+  check5("导入行展示上游能力摘要，拿不到标「未探测」（R119）",
+    /function capSummaryHtml\(c\)/.test(raw) && raw.includes("cap-unknown") && /未探测/.test(raw));
+  check5("已存在的模型可「更新能力」覆写（R119：把旧版编造值洗成上游真值）",
+    /data-apply-cap="\$\{i\}"/.test(raw) && /function applyImportedCap\(i\)/.test(raw));
+  check5("能力来源徒章三态齐备（上游/手填/未探测，R119）",
+    /function capSourceTag\(src\)/.test(raw) && raw.includes('class="cm-meta cap-api"') &&
+    raw.includes('cap-user') && raw.includes('cap-unknown') && css.includes(".cap-api") && css.includes(".cap-unknown"));
+  check5("费率页自定义渠道显示接入点与脱敏 key（R119）",
+    /function feeChannelAccessHtml\(ch\)/.test(raw) && /fee-copy-url/.test(raw) && /fee-copy-key/.test(raw) &&
+    css.includes(".fee-access") && css.includes(".fee-access-v"));
+  check5("api-key 明文只在点复制时按需取（R119：面板不得缓存明文）",
+    /async function copyCustomKey\(name\)/.test(raw) &&
+    /api\("\/api\/config\/custom_channel_key", \{ name \}\)/.test(raw));
+  check5("列表/费率载荷里的 key 不得当 title 明文悬浮显示（R119）",
+    !/title="\$\{esc\(c\.api_key\)\}"/.test(raw));
+  check5("新建渠道后自动拉一次上游模型（R119：endpoint+key 填完即可勾选）",
+    /saveChannelEditor[\s\S]{0,900}?openModelImport\(/.test(raw));
+  check5("费率页上下文/能力措辞按来源区分（R119：手填/实测不冒充上游）",
+    /CAP_SRC_TEXT/.test(raw) && raw.includes("面板手填值") && raw.includes("上游接口返回"));
   check5("导入列表有滚动容器样式", /\.import-list \{ max-height/.test(css));
   // 导入弹层叠在自定义渠道弹层之上：.overlay 基类 z-index=100，
   // 写比它小的值会被压在下面（实测：坐标点模型名落到下层卡片上，勾不上）。

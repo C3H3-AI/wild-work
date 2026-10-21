@@ -351,8 +351,13 @@ type ModelInfo struct {
 	// 为什么单独一个标志而不是直接置 ContextFromAPI=true：口径不同——
 	// 实测值不是「上游声明」，面板展示时必须能如实标注来源（否则就是把实测
 	// 冒充成官方值，违反 R46/issue #40 的「不把缺失信息当成确定结论」原则）。
-	// 消费方约定：has_context = ContextFromAPI || HandMeasured。
+	// 消费方约定：has_context = ContextFromAPI || HandMeasured || ContextFromUser。
 	HandMeasured bool
+	// ContextFromUser 标记上下文/能力字段是**用户在面板手填**的（自定义渠道专用）：
+	// 既不是上游声明，也不是本工具实测，但同样是「有人对它负责」的确定值，
+	// 所以也要能展示（否则用户填了上下文却永远显示「未知」，等于白填）。
+	// 三者互斥，来源不同只为面板如实标注，不参与任何路由/容量计算。
+	ContextFromUser bool
 	// 以下能力字段均为「已确认为 true」才置 true；数据缺失时保持 false（未知）。
 	// 未知与「明确不支持」在语义上不同，但对消费方（/v1/models 声明、UI 图标）
 	// 的处理一致：不声明该能力。需要区分时由各渠道自行记录来源。

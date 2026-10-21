@@ -1297,6 +1297,34 @@ function refreshTabBalances() {
   });
 }
 
+// feeChannelAccessHtml 费率页里「自定义渠道」的接入点一行（R119）：
+// 面板被当成「模型接入点总表」用，需要一眼看到每个渠道走哪条线、用哪把 key。
+// 内建渠道没有 base_url/api_key（endpoint 在代码里写死）⇒ 返回空串，不占位。
+// key 只显示脱敏值：明文绝不随费率接口批量下发，只在用户点「复制」那一刻按需取（见 copyCustomKey）。
+function feeChannelAccessHtml(ch) {
+  if (!ch || !ch.base_url) return "";
+  const key = ch.api_key_masked || "（未配置 key）";
+  return `<div class="fee-access">
+    <span class="fee-access-k">接入点</span><code class="fee-access-v fee-copy-url" role="button" tabindex="0"
+      data-copy="${esc(ch.base_url)}" title="点击复制接入点：${esc(ch.base_url)}">${esc(ch.base_url)}</code>
+    <span class="fee-access-k">api-key</span><code class="fee-access-v fee-copy-key" role="button" tabindex="0"
+      data-ch="${esc(ch.channel)}" title="点击复制完整 api-key（此时才向后端取明文，不批量下发）">${esc(key)}</code>
+  </div>`;
+}
+
+// copyCustomKey 复制某个自定义渠道的**完整** api-key（R119）：面板平时只拿到脱敏串，
+// 复制要的是可用凭据 ⇒ 只在用户点下去时才请求 /api/config/custom_channel_key 取一次明文。
+// 明文只进剪贴板，不进 DOM、不缓存（与「零 token 落盘」同口径：能不见就不见）。
+async function copyCustomKey(name) {
+  try {
+    const res = await api("/api/config/custom_channel_key", { name });
+    if (!res || !res.ok || !res.api_key) { toast("该渠道未配置 api-key"); return; }
+    copyText(res.api_key, `渠道 ${name} 的 api-key`);
+  } catch (e) {
+    toast(`取 api-key 失败：${e.message}`);
+  }
+}
+
 function renderFees(fees) {
   const box = $("feesBox");
   const channels = fees.channels || [];
@@ -1336,45 +1364,54 @@ function renderFees(fees) {
   };
 
   // 上下文标记：模型 ID 后的 (1M)/(180K) 小字标。
-  // has_context = 上游接口真实返回（context_from_api）或本工具手工实测（hand_measured）。
-  // 实测值用带 * 的写法「(1M*)」+ tooltip 标注来源——不把实测冒充成上游官方值，
+  // has_context = 上游接口真实返回 / 本工具手工实测 / 用户在面板手填（R119）。
+  // tooltip 必须如实标出来源——不把实测/手填冒充成上游官方值，
   // 同时也不埋没它（cline 这类渠道上游根本不返回上下文，只能靠实测）。
+  const CAP_SRC_TEXT = { api: "上游接口返回", measured: "本工具实测值（仅供参考，非上游官方声明）", user: "面板手填值（非上游声明）" };
   const ctxTag = (m) => {
     if (!m || !m.has_context || !m.context_window) return "";
-    const hand = m.hand_measured ? "*" : "";
-    const src = m.hand_measured ? "本工具实测值（仅供参考，非上游官方声明）" : "上游接口返回";
-    return ` <span class="ctx-tag${m.hand_measured ? " hand" : ""}" title="上下文窗口：${fmtTokensCompact(m.context_window)} tokens（${src}）">(${fmtTokensCompact(m.context_window)}${hand})</span>`;
+    // cap_source 优先（后端统一口径）；老后端无该字段时退回 hand_measured 二选一
+    const srcKey = m.cap_source || (m.hand_measured ? "measured" : "api");
+    const src = CAP_SRC_TEXT[srcKey] || CAP_SRC_TEXT.api;
+    const hand = srcKey === "api" ? "" : "*";
+    return ` <span class="ctx-tag${hand ? " hand" : ""}" title="上下文窗口：${fmtTokensCompact(m.context_window)} tokens（${src}）">(${fmtTokensCompact(m.context_window)}${hand})</span>`;
   };
 
   // 能力文字摘要，拼进模型 tooltip。
-  // 措辞说明：上游模型列表接口未声明某能力时，本工具不自行断言其「不支持」，
-  // 只说「未声明」；hand_measured（本工具实测）时改说「实测不支持」，如实标出来源。
+  // 措辞说明：能力来源决定「不支持」这三个字能不能说出口（R49/R119）——
+  // 上游未声明 ⇒ 只说「未声明」；实测/手填 ⇒ 说「实测不支持」/「手填未勾选」；
+  // 压根没探测过 ⇒ 说「未探测」，绝不用默认值冒充结论。
   const capText = (m) => {
     if (!m) return null;
-    const yes = [], unknown = [];
-    (m.supports_images ? yes : unknown).push("图像输入");
-    (m.supports_reasoning ? yes : unknown).push("思考模式");
+    const srcKey = m.cap_source || (m.hand_measured ? "measured" : "api");
+    const noText = { api: "上游未声明", measured: "实测不支持", user: "手填未勾选", unknown: "未探测" }[srcKey] || "上游未声明";
+    const yes = [], no = [];
+    (m.supports_images ? yes : no).push("图像输入");
+    (m.supports_reasoning ? yes : no).push("思考模式");
     const parts = [];
     if (yes.length) parts.push(`支持：${yes.join("、")}`);
-    if (unknown.length) parts.push(`${m.hand_measured ? "实测不支持" : "上游未声明"}：${unknown.join("、")}`);
+    if (no.length) parts.push(`${noText}：${no.join("、")}`);
     if (m.reasoning_efforts && m.reasoning_efforts.length) {
       parts.push(`思考档位：${m.reasoning_efforts.join("/")}${m.default_reasoning_effort ? `（默认 ${m.default_reasoning_effort}）` : ""}`);
     }
-    if (m.hand_measured) parts.push("（能力与上下文为本工具实测值，仅供参考）");
+    if (srcKey === "measured") parts.push("（能力与上下文为本工具实测值，仅供参考）");
+    if (srcKey === "user") parts.push("（能力与上下文为您在面板手填，本工具不核实其真实性）");
+    if (srcKey === "unknown") parts.push("（未探测过能力：可在「自定义模型」里点「导入」拉一次上游 /models）");
     return parts.join("；");
   };
 
-  // 模型 id 的 tooltip：能拿到上下文则展示，否则明确说未知
+  // 模型 id 的 tooltip：能拿到上下文则按来源展示，否则明确说未知
   const modelTip = (m) => {
     const parts = [`模型：${m.model}`];
+    const srcKey = m.cap_source || (m.hand_measured ? "measured" : "api");
     if (m.has_context && m.context_window) {
-      const src = m.hand_measured ? "（本工具实测，非上游官方值）" : "";
+      const src = srcKey === "api" ? "" : `（${CAP_SRC_TEXT[srcKey]}）`;
       parts.push(`上下文窗口：${fmtTokensCompact(m.context_window)}${src}`);
       if (m.max_tokens) parts.push(`最大输出：${fmtTokensCompact(m.max_tokens)}`);
     } else {
       parts.push("上下文窗口：未知");
       parts.push("最大输出：未知");
-      parts.push("（上游未提供该信息）");
+      parts.push(srcKey === "unknown" ? "（尚未探测上游，本工具不编造默认值）" : "（上游未提供该信息）");
     }
     const ct = capText(m);
     if (ct) parts.push(ct);
@@ -1449,6 +1486,7 @@ function renderFees(fees) {
     const models = ch.models || [];
     const hidden = ch.channel !== active ? ' class="hidden"' : '';
     html += `<div class="fees-panel${hidden ? ' hidden' : ''}" data-feepanel="${esc(ch.channel)}">`;
+    html += feeChannelAccessHtml(ch); // 自定义渠道才非空：接入点 + Key 一览（R119）
     html += `<table><thead><tr><th>模型</th><th>倍率</th><th>模型</th><th>倍率</th></tr></thead><tbody>`;
     for (let i = 0; i < models.length; i += 2) {
       const m1 = models[i];
@@ -1482,6 +1520,17 @@ function bindFeesTabs() {
       copyText(cpid.dataset.mid || cpid.textContent, "模型 ID");
       return;
     }
+    // 自定义渠道的接入点 / api-key 一键复制（R119）：key 走按需取明文，不得复制脱敏串
+    const urlc = e.target.closest && e.target.closest("code.fee-copy-url");
+    if (urlc) {
+      copyText(urlc.dataset.copy, "接入点");
+      return;
+    }
+    const keyc = e.target.closest && e.target.closest("code.fee-copy-key");
+    if (keyc) {
+      copyCustomKey(keyc.dataset.ch);
+      return;
+    }
     const btn = e.target.closest(".fees-tab");
     if (!btn) return;
     const ch = btn.dataset.feech;
@@ -1496,7 +1545,11 @@ function bindFeesTabs() {
   box.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
     const code = e.target.closest("code.fee-model-copy");
-    if (code && box.contains(code)) { e.preventDefault(); copyText(code.dataset.mid, "模型名"); }
+    if (code && box.contains(code)) { e.preventDefault(); copyText(code.dataset.mid, "模型名"); return; }
+    const urlc = e.target.closest("code.fee-copy-url");
+    if (urlc) { e.preventDefault(); copyText(urlc.dataset.copy, "接入点"); return; }
+    const keyc = e.target.closest("code.fee-copy-key");
+    if (keyc) { e.preventDefault(); copyCustomKey(keyc.dataset.ch); }
   });
 }
 
@@ -2335,6 +2388,18 @@ function formatTokenCount(num) {
   return String(num);
 }
 
+// capSourceTag 能力来源小章（R119）：「上游」= /models 声明过，「手填」= 用户在面板填的，
+// 「未探测」= 从来没拉过 / 拉了但上游什么能力字段都没给。
+// 为什么要显示：旧版导入把「1M/64k/全能力」当上游声明写死，面板与 /v1/models
+// 把「不知道」冒充成「上游说的」（R49 同款纪律）；来源标出来后用户才知道该去补哪些。
+// 措辞与费率页 capText() 共用同一套语义，不在两处另维护名单。
+function capSourceTag(src) {
+  const s = src || "unknown";
+  const map = { api: ["上游", "cap-api", "能力/上下文来自上游 /models 声明"], user: ["手填", "cap-user", "能力/上下文由您在面板手填（本工具不核实）"], unknown: ["未探测", "cap-unknown", "未拿到能力信息：点「导入」拉一次上游 /models；不编造默认值"] };
+  const [txt, cls, tip] = map[s] || map.unknown;
+  return `<span class="cm-meta ${cls}" title="${esc(tip)}">${txt}</span>`;
+}
+
 function renderCustomChList() {
   // R85：每个 Provider 一个区块，Provider 自己一行（信息 + 操作），
   // 它下面的每个模型也各占一行（模型信息 + 操作）。**任何一行都不换行**，
@@ -2354,9 +2419,12 @@ function renderCustomChList() {
       if (typeof m === "object" && m.supports_images) caps.push("识图");
       if (typeof m === "object" && (m.supports_reasoning || efforts.length)) caps.push("思考");
       if (typeof m !== "object" || m.supports_tools !== false) caps.push("工具");
+      // 未探测过能力的行不得把「工具」当成已声明显示（上面那个兼容分支在旧数据上永远为真）
+      const srcTag = capSourceTag(typeof m === "object" ? m.cap_source : "");
       return `<div class="cm-model-row">
         <div class="cm-info">
           <code class="cm-model-id" title="${esc(mid)}">${esc(mid)}</code>
+          ${srcTag}
           <span class="cm-meta">上下文 ${esc(ctx)}</span>
           <span class="cm-meta">输出 ${esc(out)}</span>
           <span class="cm-meta ${efforts.length ? "cm-effort" : ""}">${efforts.length ? "档位 " + esc(efforts.join("/")) : "无思考"}</span>
@@ -2372,7 +2440,8 @@ function renderCustomChList() {
         <div class="cm-info">
           ${chBadge(c.name, editCustomChannels)}
           <span class="cm-url" title="${esc(c.base_url)}">${esc(c.base_url)}</span>
-          <span class="cm-key hint" title="${esc(c.api_key || '')}">[${esc(keyMask)}]</span>
+          <span class="cm-key hint" data-ch-name="${esc(c.name)}" style="cursor:pointer"
+            title="点击复制完整 api-key（此时才向后端取明文）">[${esc(keyMask)}]</span>
           <span class="cm-meta">${models.length} 个模型</span>
         </div>
         <button class="btn small cm-btn-edit" data-edit-custom="${i}">编辑</button>
@@ -2571,14 +2640,23 @@ function saveChannelEditor() {
   if (!/^https?:\/\//i.test(url)) return fail("Base URL 必须以 http:// 或 https:// 开头");
   if (editChIdx >= 0) {
     Object.assign(editCustomChannels[editChIdx], { base_url: url.replace(/\/+$/, ""), api_key: key });
-  } else {
-    if (editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
-    editCustomChannels.push({ name, base_url: url.replace(/\/+$/, ""), api_key: key, models: [], enabled: true });
+    closeChannelEditor();
+    renderCustomChList();
+    $("customChOk").textContent = "已更新，点击「保存全部配置」生效";
+    $("customChErr").textContent = "";
+    return;
   }
+  if (editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
+  // enabled 字段后端已废弃（R83 移除「停用」概念），不再写这个死字段。
+  const idx = editCustomChannels.length;
+  editCustomChannels.push({ name, base_url: url.replace(/\/+$/, ""), api_key: key, models: [] });
   closeChannelEditor();
   renderCustomChList();
-  $("customChOk").textContent = "已更新，点击「保存全部配置」生效";
   $("customChErr").textContent = "";
+  // 需求②：Provider 一行一key 填完就自动拉一次 /models 并弹勾选列表，
+  // 不让用户再「先保存→回列表→点导入」三跳。拉失败也不拦保存（只提一句）。
+  $("customChOk").textContent = "已添加，正在拉取上游模型列表…";
+  openModelImport(idx);
 }
 
 // ---------- 模型管理弹窗（R82） ----------
@@ -2606,6 +2684,7 @@ function renderModelManager() {
     const effTxt = efforts.length ? `思考 ${efforts.join("/")}` : "";
     return `<div class="model-mgr-row">
       <code title="${esc(mid)}">${esc(mid)}</code>
+      ${capSourceTag(typeof m === "object" ? m.cap_source : "")}
       <span class="mm-meta">${esc(ctx)} / ${esc(out)}</span>
       ${effTxt ? `<span class="tag ok">${esc(effTxt)}</span>` : ""}
       <span class="mm-meta">${esc(caps.join("·") || "—")}</span>
@@ -2634,13 +2713,18 @@ function openModelEditor(modelIdx) {
   const o = typeof m === "object" && m ? m : {};
   $("modelEditorTitle").textContent = m ? "编辑模型" : "新增模型";
   $("meId").value = m ? (typeof m === "string" ? m : m.id) : "";
-  $("meCtx").value = o.context_window ? formatTokenCount(parseTokens(o.context_window, 0)) : "1M";
-  $("meOut").value = o.max_tokens ? formatTokenCount(parseTokens(o.max_tokens, 0)) : "64k";
+  // 默认值一律留空：旧版新建时预填「1M / 64k / 三能力全勾」，保存即变成「上游声明」写进配置
+  // 并进 /v1/models（R49 禁止编造）。拉不到就空着，由「导入」从上游拿或由用户自己填。
+  $("meCtx").value = o.context_window ? formatTokenCount(parseTokens(o.context_window, 0)) : "";
+  $("meOut").value = o.max_tokens ? formatTokenCount(parseTokens(o.max_tokens, 0)) : "";
   $("meEff").value = (o.reasoning_efforts || []).join(", ");
   $("meImg").checked = !!o.supports_images;
   $("meRsn").checked = !!o.supports_reasoning || (o.reasoning_efforts || []).length > 0;
   $("meTools").checked = typeof m === "string" ? true : o.supports_tools !== false;
+  // 来源提标：告知当前这份能力是上游声明还是手填（保存后会被改标为「手填」）
   $("meErr").textContent = "";
+  if ($("meCapSrc")) $("meCapSrc").innerHTML = capSourceTag(o.cap_source) +
+    (m ? "" : ' <span class="hint">新增模型默认不预填任何能力：留空保存就是「未探测」，可事后用「导入」从上游拉。</span>');
   $("modelEditorOverlay").classList.remove("hidden");
   setTimeout(() => $("meId").focus(), 50);
 }
@@ -2675,6 +2759,14 @@ function saveModelEditor() {
     reasoning_efforts: efforts,
   };
   if (efforts.length) rec.default_reasoning_effort = efforts[0];
+  // 面板保存的就是人手填的值 ⇒ 标 "user"；一个字都没改（直接点确定）则保留原来源，
+  // 避免把上游声明的能力误标成手填（那会让 tooltip 说「您手填」而逐辑上根本没动）。
+  const prev = editModelIdx >= 0 && typeof ch.models[editModelIdx] === "object" ? ch.models[editModelIdx] : null;
+  const dirty = !prev || ["context_window", "max_tokens", "supports_images", "supports_reasoning", "supports_tools"].some((k) => (prev[k] || 0) !== (rec[k] || 0))
+    || ((prev.reasoning_efforts || []).join(",")) !== efforts.join(",");
+  rec.cap_source = dirty ? "user" : (prev.cap_source || "user");
+  if (!rec.context_window) delete rec.context_window;
+  if (!rec.max_tokens) delete rec.max_tokens;
   if (editModelIdx >= 0) ch.models[editModelIdx] = rec; else ch.models.push(rec);
   closeModelEditor();
   renderModelManager();
@@ -2738,11 +2830,29 @@ function renderImportList() {
     // （实测：点 label 反而把刚勾上的取消掉）。显式 for 只触发一次。
     const cid = `imp-${i}`;
     return `<div class="import-row"><input type="checkbox" id="${cid}" data-import-pick="${i}"${m.checked ? " checked" : ""}${m.exists ? " disabled" : ""}>` +
-      `<label class="import-name" for="${cid}"><code>${esc(m.id)}</code></label>` +
-      (m.exists ? '<span class="tag neutral" style="margin-left:auto">已存在</span>' : "") +
+      `<label class="import-name" for="${cid}"><code>${esc(m.id)}</code>${capSummaryHtml(m.cap)}</label>` +
+      (m.exists
+        ? `<button class="btn small cm-btn-cap" data-apply-cap="${i}"${m.cap ? "" : " disabled"} title="${m.cap ? "用本次拉到的上游能力覆写已存模型（不动模型 ID）" : "本次未拉到该模型的能力信息"}">更新能力</button>`
+        : "") +
       `</div>`;
   }).join("");
   $("importList").innerHTML = rows || '<div class="hint">（没有匹配的模型）</div>';
+}
+
+// capSummaryHtml 导入行后面的能力摘要：拉到什么写什么，拉不到就标「未探测」。
+// 这里绝不能出现「默认 1M」这类括号里补出来的字——那一行就是用户判断
+// 「该不该手工补填」的唯一依据（R119，推翻旧版编造默认值）。
+function capSummaryHtml(c) {
+  if (!c) return `<span class="cm-meta cap-unknown" title="上游没给出该模型的能力/上下文信息">未探测</span>`;
+  const bits = [];
+  if (c.context_window) bits.push(`上下文 ${formatTokenCount(c.context_window)}`);
+  if (c.max_tokens) bits.push(`输出 ${formatTokenCount(c.max_tokens)}`);
+  if (c.supports_images) bits.push("识图");
+  if (c.supports_reasoning) bits.push("思考");
+  if (c.supports_tools === false) bits.push("无工具");
+  if (c.reasoning_efforts && c.reasoning_efforts.length) bits.push(`档位 ${c.reasoning_efforts.join("/")}`);
+  if (!bits.length) return `<span class="cm-meta cap-unknown" title="上游只给了模型 ID，没有能力字段">未探测</span>`;
+  return `<span class="cm-meta cap-api">${esc(bits.join("·"))}</span>`;
 }
 
 async function openModelImport(chIdx) {
@@ -2763,10 +2873,18 @@ async function openModelImport(chIdx) {
       return;
     }
     const have = new Set((ch.models || []).map((m) => (typeof m === "string" ? m : m.id)));
-    const ids = (res.models || []).filter((id) => id);
-    importCtx.models = ids.map((id) => ({ id, exists: have.has(id), checked: !have.has(id) }));
+    // 后端同一次探测既回纯 ID（兼容旧契约）又回 caps（尽力解析出的能力）；
+    // 拿不到 caps 时退回 ID 形态，能力列统一显示「未探测」，不编造默认值。
+    const caps = res.caps && res.caps.length ? res.caps : null;
+    const list = caps || (res.models || []).filter((id) => id).map((id) => ({ id }));
+    importCtx.models = list
+      .filter((c) => c && c.id)
+      .map((c) => ({ id: c.id, cap: caps ? c : null, exists: have.has(c.id), checked: !have.has(c.id) }));
     const fresh = importCtx.models.filter((m) => !m.exists).length;
-    $("importHint").textContent = `上游共 ${ids.length} 个模型，其中 ${fresh} 个未添加（已存在的不可勾选）。勾选后点「导入选中」，再点「保存全部配置」生效。`;
+    const noCap = importCtx.models.filter((m) => !m.cap).length;
+    $("importHint").textContent = `上游共 ${importCtx.models.length} 个模型，其中 ${fresh} 个未添加。` +
+      (noCap ? `有 ${noCap} 个上游没声明能力，导入后会在列表标「未探测」，需要的话请手动补填。` : "") +
+      "勾选后点「导入选中」，再点「保存全部配置」生效。";
     renderImportList();
   } catch (e) {
     $("importErr").textContent = `拉取失败：${e.message}`;
@@ -2774,9 +2892,37 @@ async function openModelImport(chIdx) {
   }
 }
 
-function closeModelImport() {
-  $("modelImportOverlay").classList.add("hidden");
-  importCtx = { chIdx: -1, models: [] };
+// applyImportedCap 对「已存在」的模型只覆写能力字段（保留 ID 与用户其他改动）：
+// 旧版导入把 1M/64k 这类编造值写进了配置，新一键拉取后必须能就地把它们洗成上游真值，
+// 否则用户只能删了重新导入。
+function applyImportedCap(i) {
+  const ch = editCustomChannels[importCtx.chIdx];
+  const row = importCtx.models[i];
+  if (!ch || !row || !row.cap) return;
+  const k = (ch.models || []).findIndex((m) => (typeof m === "string" ? m : m.id) === row.id);
+  if (k < 0) return;
+  const cap = capToModelConfig(row.cap);
+  cap.id = row.id;
+  ch.models[k] = cap;
+  $("customChOk").textContent = `已用上游能力覆写 ${row.id}，点击「保存全部配置」生效`;
+  renderCustomChList();
+  if (mgrChIdx === importCtx.chIdx) renderModelManager();
+}
+
+// capToModelConfig 把探测到的能力写成 ModelConfig（只搬真实拿到的，拉不到就是零值）。
+// 旧版在这里写死 1M/64k/全能力，面板与 /v1/models 于是把「不知道」说成「上游说的」——
+// R119 推翻。cap_source="api" 才能被当作声明展示（与后端 custom.ModelCap.ToModelConfig 同口径）。
+function capToModelConfig(c) {
+  const rec = { id: c.id };
+  if (c.context_window) rec.context_window = c.context_window;
+  if (c.max_tokens) rec.max_tokens = c.max_tokens;
+  if (c.supports_images) rec.supports_images = true;
+  if (c.supports_reasoning) rec.supports_reasoning = true;
+  if (c.supports_tools === true || c.supports_tools === false) rec.supports_tools = c.supports_tools;
+  if (c.reasoning_efforts && c.reasoning_efforts.length) rec.reasoning_efforts = c.reasoning_efforts.slice();
+  if (c.default_reasoning_effort) rec.default_reasoning_effort = c.default_reasoning_effort;
+  if (c.cap_source) rec.cap_source = c.cap_source;
+  return rec;
 }
 
 function confirmModelImport() {
@@ -2786,9 +2932,7 @@ function confirmModelImport() {
   let added = 0;
   for (const m of importCtx.models) {
     if (!m.checked || m.exists) continue;
-    // 与「添加模型」按钮同款默认值（见 custom-model-add-row 的 input 默认值）
-    ch.models.push({ id: m.id, context_window: 1000000, max_tokens: 64000,
-      supports_images: true, supports_reasoning: true, supports_tools: true, reasoning_efforts: [] });
+    ch.models.push(m.cap ? capToModelConfig(m.cap) : { id: m.id });
     added++;
   }
   closeModelImport();
@@ -2797,6 +2941,11 @@ function confirmModelImport() {
     ? `已导入 ${added} 个模型，点击「保存全部配置」生效`
     : "没有新增模型（选中的都已存在）";
   $("customChErr").textContent = "";
+}
+
+function closeModelImport() {
+  $("modelImportOverlay").classList.add("hidden");
+  importCtx = { chIdx: -1, models: [] };
 }
 
 // validateBackupProxy 校验备用上游通道地址，返回 [url, err]（空串合法 = 关闭）。
@@ -3354,6 +3503,9 @@ function bind() {
       renderCustomChList();
       return;
     }
+    // Provider 行的脱敏 key 位：点一下复制完整明文（R119）
+    const keyChip = e.target.closest(".cm-key");
+    if (keyChip && keyChip.dataset.chName) copyCustomKey(keyChip.dataset.chName);
   });
 
   // R82：新增渠道走独立弹窗（不再依赖底部输入行）
@@ -3422,6 +3574,11 @@ function bind() {
   $("btnImportNone").onclick = () => {
     for (const i of visibleImportIdx()) importCtx.models[i].checked = false;
     syncChecks();
+  };
+  // 「更新能力」按钮（勾上的行不重建，整块重渲染靠委托）
+  $("importList").onclick = (e) => {
+    const capBtn = e.target.closest("[data-apply-cap]");
+    if (capBtn) applyImportedCap(+capBtn.dataset.applyCap);
   };
   // 用事件委托绑定在容器上（列表会整块重建，绑在元素上会随重建丢失）
   $("importList").onchange = (e) => {

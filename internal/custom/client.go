@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -221,7 +220,7 @@ func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
 }
 
 // FetchModels 返回该渠道配置的模型列表。
-// 规则：用户配的是什么就返回什么，绝不向上游拉取，绝不做任何启发式推测。
+// 规则：用户配的是什么就返回什么，运行期绝不向上游拉取（面板主动探测走 TestConnection），绝不做任何启发式推测。
 func (c *Client) FetchModels(_ *auth.Auth) ([]provider.ModelInfo, error) {
 	return c.StaticModels(), nil
 }
@@ -245,47 +244,14 @@ func (c *Client) StaticModels() []provider.ModelInfo {
 			ReasoningEfforts:       efforts,
 			DefaultReasoningEffort: m.DefaultReasoningEffort,
 			SupportsTools:          m.ToolsEnabled(),
+			// 上下文的「来源」按 CapSource 如实上报：以前这里两个标志都不置，
+			// 导致自定义渠道面板上下文列永远好显示「未知」（消费方判据 has_context 永远为假）。
+			ContextFromAPI:  m.CapFromAPI(),
+			ContextFromUser: m.CapFromUser(),
 		}
 		out = append(out, mi)
 	}
 	return out
-}
-
-// TestConnection 测试与上游的连通性。
-func (c *Client) TestConnection() ([]string, error) {
-	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + "/models"
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	if c.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-	}
-	hc := &http.Client{Timeout: 10 * time.Second}
-	resp, err := hc.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("连接失败：%w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("上游返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-	var data struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("解析模型列表失败：%w", err)
-	}
-	var ids []string
-	for _, d := range data.Data {
-		if d.ID != "" {
-			ids = append(ids, d.ID)
-		}
-	}
-	return ids, nil
 }
 
 // ---------------------------------------------------------------------------
