@@ -1429,8 +1429,9 @@ for (const [label, re] of uniq) {
   check5("导入弹层存在且带筛选/全选/全不选/确认", 
     ['modelImportOverlay', 'importFilter', 'btnImportAll', 'btnImportNone', 'btnImportConfirm']
       .every((id) => html.includes(`id="${id}"`)));
-  check5("导入走既有 custom_channel_test 端点（不新增后端接口）",
-    /openModelImport[\s\S]{0,600}?\/api\/config\/custom_channel_test/.test(raw));
+  check5("导入走既有 custom_channel_test 端点（不新增拉模型接口）",
+    /function probeCustomChannel\(ch\)[\s\S]{0,400}?\/api\/config\/custom_channel_test/.test(raw) &&
+    /function openModelImport\([\s\S]{0,700}?probeCustomChannel\(/.test(raw));
   check5("已存在的模型不可勾选（避免重复导入）",
     /exists: have\.has\(/.test(raw) && /\$\{m\.exists \? " disabled" : ""\}/.test(raw));
   check5("导入只改编辑态、仍需「保存全部配置」落盘（不隐式写盘）",
@@ -1447,7 +1448,7 @@ for (const [label, re] of uniq) {
     /function capSummaryHtml\(c\)/.test(raw) && raw.includes("cap-unknown") && /未探测/.test(raw));
   check5("已存在的模型可「更新能力」覆写（R119：把旧版编造值洗成上游真值）",
     /data-apply-cap="\$\{i\}"/.test(raw) && /function applyImportedCap\(i\)/.test(raw));
-  check5("能力来源徒章三态齐备（上游/手填/未探测，R119）",
+  check5("能力来源徽章三态齐备（上游/手填/未探测，R119）",
     /function capSourceTag\(src\)/.test(raw) && raw.includes('class="cm-meta cap-api"') &&
     raw.includes('cap-user') && raw.includes('cap-unknown') && css.includes(".cap-api") && css.includes(".cap-unknown"));
   check5("费率页自定义渠道显示接入点与脱敏 key（R119）",
@@ -1462,6 +1463,29 @@ for (const [label, re] of uniq) {
     /saveChannelEditor[\s\S]{0,900}?openModelImport\(/.test(raw));
   check5("费率页上下文/能力措辞按来源区分（R119：手填/实测不冒充上游）",
     /CAP_SRC_TEXT/.test(raw) && raw.includes("面板手填值") && raw.includes("上游接口返回"));
+  // R121：接入点规范化 + 端点定位。面板不得自己拼 /v1（只有上游能回答「哪个根是真的」），
+  // 但必须把上游纠正后的根回写进配置，否则用户下次还得重粘一遍死地址。
+  check5("渠道编辑器有「识别端点」入口并绑到 sniffFromEditor（R121）",
+    html.includes('id="btnCeSniff"') && /function sniffFromEditor\(\)/.test(raw) &&
+    /\$\("btnCeSniff"\)\.onclick[\s\S]{0,60}sniffFromEditor\(\)/.test(raw));
+  check5("探测结论回写真实根（R121：res.base_url 覆盖 ch.base_url）",
+    /function applyProbeResult\(res, target, setHint\)[\s\S]{0,900}?target\.base_url = res\.base_url/.test(raw));
+  check5("保存渠道时不再硬拦「缺协议头」（R121：交给后端规范化，内网补 http）", (() => {
+    const at = raw.indexOf("function saveChannelEditor");
+    if (at < 0) return false;
+    const seg = raw.slice(at, at + 3000);
+    return /looksLikeEndpoint\(url\)/.test(seg) && !/\/\^https\?:/.test(seg);
+  })());
+  check5("前端不再对 api-key 做二次脱敏（R121：后端已给出长头+四星+短尾，再切一遍会切坏）",
+    /const keyMask = c\.api_key \|\| "无密钥"/.test(raw) && !/c\.api_key\.slice\(0, 3\)/.test(raw));
+  check5("前端脱敏判据认新的四星标记且兼容旧 …/••（R121：与后端 isMaskedKey 同步）",
+    raw.includes('const isMaskedKey = (k)') && raw.includes('k.includes("****")') &&
+    raw.includes('k.includes("…")') && raw.includes('k.includes("••")'));
+  check5("地址合法性只看形状、不在前端猜协议（R121：补 http/https 是后端的活）",
+    /function looksLikeEndpoint\(u\)/.test(raw) && /\/\^https\?:\\\/\\\/\/i\.test\(u\)/.test(raw));
+  check5("探测失败要列出逐条 tries 而不是只一句「连接失败」（R121）",
+    /res\.tries[\s\S]{0,400}?→/.test(raw) && /function applyProbeResult/.test(raw));
+  check5("渠道编辑器留了结论回显位（R121）", html.includes('id="ceHint"'));
   check5("导入列表有滚动容器样式", /\.import-list \{ max-height/.test(css));
   // 导入弹层叠在自定义渠道弹层之上：.overlay 基类 z-index=100，
   // 写比它小的值会被压在下面（实测：坐标点模型名落到下层卡片上，勾不上）。

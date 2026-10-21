@@ -2658,11 +2658,11 @@ func (a *App) SetCompat(defaultChannel string, maxTokensCap int, modelMap map[st
 // api_key 脱敏回写处理（同 oczen key）：面板回显的是脱敏值（含 …）。
 // 用户没改动过某个渠道的 key 时，提交回来的仍是脱敏串——若原样落盘，
 // 就会把真实密钥换成「sk-abc…wxyz」这种废值。故此处对每个渠道：
-// 提交值含 「…」 则视为未修改，从现有配置按渠道名找回真实密钥。
+// 提交值是脱敏形态（isMaskedKey）则视为未修改，从现有配置按渠道名找回真实密钥。
 func (a *App) SetCustomChannels(channels []custom.ChannelConfig) error {
 	seen := map[string]bool{}
 	for i := range channels {
-		if strings.Contains(channels[i].APIKey, "…") { // 脱敏形态 = 未改动，保留现值
+		if isMaskedKey(channels[i].APIKey) { // 脱敏形态 = 未改动，保留现值
 			channels[i].APIKey = ""
 		}
 		if err := channels[i].Validate(); err != nil {
@@ -2726,8 +2726,8 @@ func (a *App) customChannelFeesMeta() map[string][2]string {
 	return out
 }
 
-// maskCustomChannels 返回配置的深拷贝，并将 api_key 脱敏（非空时仅露首 3 + 尾 4）。
-// 脱敏串保留 「…」 标记，供 SetCustomChannels 识别「未改动」。
+// maskCustomChannels 返回配置的深拷贝，并将 api_key 脱敏（长头 + **** + 短尾，见 maskKey）。
+// 脱敏串里的 **** 就是「未改动」标记，供 SetCustomChannels / 测试端点识别。
 func maskCustomChannels(in []custom.ChannelConfig) []custom.ChannelConfig {
 	out := make([]custom.ChannelConfig, 0, len(in))
 	for _, cc := range in {
@@ -2861,16 +2861,37 @@ func (a *App) TestOczenKey(apiKey string) (int, string, bool, error) {
 	return status, body, via, nil
 }
 
-// maskKey 脱敏 API key：保留前 5 后 4，中间以 … 代替；空串原样返回。
+// maskKey 脱敏形态：长头 + **** + 短尾（R121）。头取 12 个字符、尾取 4 个，但可见总量
+// 不得超过原文一半（短 key 自动收缩头部，收到 4 字符以下就直接全遮）。
+// 头部留长是硬需求：第三方 key 的**前缀**才是辨识度来源（百度千帆 bce-v3/ALTAK…、
+// OpenAI sk-proj-…），只留 5 个字符根本看不出是哪家，不能假定密钥都形如 sk-…。
+// 中间固定四个星（不泄漏长度），四星同时充当「面板未改动」标记（见 isMaskedKey）。
 func maskKey(key string) string {
-	if key == "" {
+	r := []rune(strings.TrimSpace(key))
+	if len(r) == 0 {
 		return ""
 	}
-	r := []rune(key)
-	if len(r) <= 9 {
-		return string(r[:1]) + "…"
+	if len(r) <= 12 {
+		return maskedMark // 短到「露头 + 尾」就等于露大半原文，直接全遮
 	}
-	return string(r[:5]) + "…" + string(r[len(r)-4:])
+	head, tail := 12, 4
+	if head+tail > len(r)/2 {
+		head = len(r)/2 - tail // 可见字符总量没有上限一半，短 key 自动收缩头部
+	}
+	if head < 4 {
+		return maskedMark
+	}
+	return string(r[:head]) + maskedMark + string(r[len(r)-tail:])
+}
+
+// maskedMark 是脱敏串的中间标记，同时被当作「面板未改动过此字段」的记号（isMaskedKey）。
+const maskedMark = "****"
+
+// isMaskedKey 认一个字符串是不是脱敏形态（而不是用户真填的密钥）。
+// 三种都认：新格式 ****、旧格式 …、更早的前端 … 占位——升级瞬间浏览器里可能还
+// 渲染着旧脱敏串，当成真值落盘会把可用密钥洗成废值（这个判定同时活在 Go 与 JS 两侧）。
+func isMaskedKey(s string) bool {
+	return strings.Contains(s, maskedMark) || strings.Contains(s, "…") || strings.Contains(s, "••")
 }
 
 // SetBackupProxy 保存全局**备用上游通道**（单一代理地址，空串 = 关闭）并即时生效。
@@ -3114,7 +3135,7 @@ func (a *App) GetState() State {
 	sort.Strings(st.Compat.Channels)
 	st.BackupProxy = a.cfg.BackupProxy
 	st.BackupProxyActive = backuplink.Enabled()
-	// oczen key 脱敏回显：仅露首 5 + 尾 4（空则原样空串）
+	// oczen key 脱敏回显（与自定义渠道同一套 maskKey，面板侧靠 **** 识别未改动）
 	st.OczenAPIKey = maskKey(a.cfg.OczenAPIKey)
 	st.BodyLog = a.cfg.BodyLog
 	// 自定义渠道路由的 api_key 同样脱敏回显（不把上游密钥明文送进面板载荷）。
@@ -3786,25 +3807,41 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, "base_url 不能为空")
 			return
 		}
-		// 面板回显的 api_key 是脱敏值（含 …）：测试未改动过的渠道时必须用真实密钥，
-		// 否则测试恒报 401（与 #117 的「探针没走同一条链路」同类）。
-		if strings.Contains(req.APIKey, "…") {
+		// 面板回显的 api_key 是脱敏值：测试未改动过的渠道时必须用真实密钥，否则测试恒报 401
+		//（与 #117 的「探针没走同一条链路」同类）。判定不能只认「…」：脱敏格式改成长头长尾后
+		// 中间是四个星号，两种都得认，因为升级瞬间浏览器里可能还渲染着旧脱敏串。
+		if isMaskedKey(req.APIKey) {
 			req.APIKey = a.resolveCustomKey(req.Name)
 		}
-		client := custom.New(req)
-		// 除纯 ID 外还回能力清单（R119）：前端勾选导入时直接拿这些字段写配置。
+		// 探测前先做端点定位（R121）：用户粘的地址常带 /chat/completions 尾巴、漏协议头，
+		// 直接拼会请求一个必死地址；Discover 同时回答「哪个根是真的」。
+		// 除纯 ID 外还回能力清单（R119）：前端勾选导入时直接拿这些字段写配置；
 		// 上游没声明的字段保持零值/nil ⇒ 前端标「未探测」，绝不拿 1M/64k 这类猜测值冒充上游声明（R49 同口径）。
-		caps, err := client.TestConnection()
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
+		d, err := custom.Discover(req)
+		var caps []custom.ModelCap
+		if d != nil {
+			caps = d.Caps
 		}
 		ids := make([]string, 0, len(caps))
 		for _, c := range caps {
 			ids = append(ids, c.ID)
 		}
-		// models 保持旧形状（[]string），不破既有契约；caps 是新增维度。
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": ids, "caps": caps})
+		resp := map[string]any{"models": ids, "caps": caps} // models 保持旧形状 []string，不破既有契约
+		if d != nil {
+			resp["base_url"], resp["adjusted"] = d.Base, d.Adjusted
+			resp["renormed"], resp["models_ok"] = d.Renormed, d.ModelsOK
+			resp["chat_ok"], resp["tries"] = d.ChatOK, d.Tries
+			if d.Note != "" {
+				resp["note"] = d.Note
+			}
+		}
+		if err != nil {
+			resp["ok"], resp["error"] = false, err.Error()
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		resp["ok"] = true
+		writeJSON(w, http.StatusOK, resp)
 	})
 	// 面板「点击复制 api-key」：明文按需单条下发，不随渠道列表/费率接口批量返回
 	//（否则每次刷新面板都把全部 key 送进浏览器，抓包/历史里全都是）。
@@ -3959,7 +3996,7 @@ type feesChannel struct {
 	Channel string         `json:"channel"`
 	Models  []feesModelRow `json:"models"`
 	// BaseURL/APIKeyMasked 仅自定义渠道填写（R119）：面板把费率页当「模型接入点总表」用，
-	// 需要在一处看全每个模型的 endpoint 与 key。key 始终是**脉敏值**（maskKey），明文由前端点「复制」
+	// 需要在一处看全每个模型的 endpoint 与 key。key 始终是**脱敏值**（maskKey），明文由前端点「复制」
 	// 时另走 POST /api/config/custom_channel_key 按需取，不随本接口批量下发。
 	BaseURL      string `json:"base_url,omitempty"`
 	APIKeyMasked string `json:"api_key_masked,omitempty"`
@@ -4167,8 +4204,8 @@ func capSourceOf(mi provider.ModelInfo) string {
 	return ""
 }
 
-// applyCustomFeesMeta 给费率表里的自定义渠道补上接入点与脉敏 key（R119）。
-// 抽成方法而不是内联在 FeesInfo：单测要能单独证「明文没进来、脉敏串进来了」。
+// applyCustomFeesMeta 给费率表里的自定义渠道补上接入点与脱敏 key（R119）。
+// 抽成方法而不是内联在 FeesInfo：单测要能单独证「明文没进来、脱敏串进来了」。
 // 内建渠道的 endpoint 写死在代码里，无需展示 ⇒ meta 表不命中就保持空串。
 func (a *App) applyCustomFeesMeta(channels *[]feesChannel) {
 	meta := a.customChannelFeesMeta()

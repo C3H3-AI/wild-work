@@ -563,10 +563,13 @@
       <div class="cfg-row"><label class="cfg-label">Base URL</label>
         <input id="ceURL" class="input grow" placeholder="如 https://api.stepfun.com/step_plan/v1" spellcheck="false"></div>
       <div class="cfg-row"><label class="cfg-label">API Key</label>
-        <input id="ceKey" class="input grow" type="password" placeholder="可选；留空表示无鉴权" spellcheck="false"></div>
+        <input id="ceKey" class="input grow" type="password" placeholder="可选；留空表示无鉴权" spellcheck="false">
+      <div class="hint" id="ceHint" style="margin-top:6px"></div>
+      <div class="hint" id="ceErr" style="color:var(--danger);margin-top:6px"></div></div>
       <div class="hint" id="ceErr" style="color:var(--danger);margin-top:6px"></div>
     </div>
     <div class="modal-actions">
+      <button class="btn small" id="btnCeSniff" title="规范化地址并在候选根里确认 /chat/completions 与模型目录">🔍 识别端点</button>
       <button class="btn small" id="btnCeCancel">取消</button>
       <button class="btn small primary" id="btnCeSave">确定</button>
     </div>

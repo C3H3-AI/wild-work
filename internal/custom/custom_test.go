@@ -423,3 +423,38 @@ func TestShorthandModelsHaveNoCapSource(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateNormalizesBaseURL 规范化必须挂在 ChannelConfig.Validate 上（R121）：面板录入
+// 与用户手改 config.json 都走这里（config.Normalize 逐渠道调 Validate）。只在前端治的话，
+// 手写的带尾巴地址会原样落盘，而本包内部一律拼 {BaseURL}/chat/completions
+// ⇒ 请求打到必死地址，报错还只有一句「连接失败」。
+func TestValidateNormalizesBaseURL(t *testing.T) {
+	ch := ChannelConfig{
+		Name:    "up1",
+		BaseURL: "  \"https://chat.example.com/v1/chat/completions/?access_token=SECRET#docs\"  ",
+	}
+	if err := ch.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if ch.BaseURL != "https://chat.example.com/v1" { // 引号、尾巴、query、fragment 全被治好
+		t.Fatalf("BaseURL = %q, want https://chat.example.com/v1", ch.BaseURL)
+	}
+	// 漏协议头的内网地址也要在 Validate 这层补齐（否则 url.Parse 判无 scheme 直接报错）
+	local := ChannelConfig{Name: "local", BaseURL: "127.0.0.1:11434/v1"}
+	if err := local.Validate(); err != nil {
+		t.Fatalf("Validate(local): %v", err)
+	}
+	if local.BaseURL != "http://127.0.0.1:11434/v1" {
+		t.Fatalf("内网地址应补 http：%q", local.BaseURL)
+	}
+	// 非法地址必须 Fail Early，不能带着坏配置继续跑
+	bad := ChannelConfig{Name: "bad"}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("空接入点应报错")
+	}
+	// 中间前缀段不得被猜删（/step_plan/v1 是真实形态）
+	step := ChannelConfig{Name: "step", BaseURL: "https://api.stepfun.com/step_plan/v1"}
+	if err := step.Validate(); err != nil || step.BaseURL != "https://api.stepfun.com/step_plan/v1" {
+		t.Fatalf("中间前缀段被改坏了：%q %v", step.BaseURL, err)
+	}
+}

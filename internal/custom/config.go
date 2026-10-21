@@ -187,7 +187,9 @@ type ChannelConfig struct {
 // Validate 校验配置合法性并规整字段。
 func (c *ChannelConfig) Validate() error {
 	c.Name = strings.TrimSpace(strings.ToLower(c.Name))
-	c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	// 接入点走统一规范化（R121）：缺协议头要补、?query/#fragment 要丢、结尾的
+	// /chat/completions 尾巴要剥。手改 config.json 也会经过这里（config.Normalize 逐渠道调 Validate）。
+	c.BaseURL = NormalizeBaseURL(c.BaseURL)
 	c.APIKey = strings.TrimSpace(c.APIKey)
 
 	if c.Name == "" {

@@ -2405,7 +2405,7 @@ function renderCustomChList() {
   // 它下面的每个模型也各占一行（模型信息 + 操作）。**任何一行都不换行**，
   // 靠横向滚动兜底而不是折行。
   const blocks = editCustomChannels.map((c, i) => {
-    const keyMask = c.api_key ? (c.api_key.length > 8 ? c.api_key.slice(0, 3) + "…" + c.api_key.slice(-4) : "••••••") : "无密钥";
+    const keyMask = c.api_key || "无密钥"; // 后端已脱敏（maskKey），前端再切一遍会把脱敏串切坏（R121）
     const models = c.models || [];
 
     const modelRows = models.map((m, j) => {
@@ -2619,6 +2619,7 @@ function openChannelEditor(idx) {
   $("ceURL").value = ch ? ch.base_url : "";
   $("ceKey").value = ch ? (ch.api_key || "") : "";
   $("ceErr").textContent = "";
+  setCeHint("");
   $("channelEditorOverlay").classList.remove("hidden");
   setTimeout(() => (ch ? $("ceURL") : $("ceName")).focus(), 50);
 }
@@ -2628,34 +2629,114 @@ function closeChannelEditor() {
   editChIdx = -1;
 }
 
+// stripQuotes 去掉首尾成对引号/反引号：从 markdown 代码块或 curl 示例里粘地址常见。
+function stripQuotes(s) {
+  s = (s || "").trim();
+  const q = `'"\``;
+  if (s.length > 1 && q.includes(s[0]) && s[s.length - 1] === s[0]) return s.slice(1, -1).trim();
+  return s;
+}
+
+// isMaskedKey 认后端下发的脱敏形态（**** / … / ••）。它不是用户真填的密钥，
+// 提交时要原样送回，后端按渠道名找回真实值（与 Go 侧 isMaskedKey 同一口径，两边得同步改）。
+const isMaskedKey = (k) => !!k && (k.includes("****") || k.includes("…") || k.includes("••"));
+
+// looksLikeEndpoint 放宽录入：允许漏协议头（后端按内/外网补 http/https）、允许带 /chat/completions
+// 尾巴（后端会剥）。只拦真正的误粘：含空白、或连 host 形状都不是。
+function looksLikeEndpoint(u) {
+  if (/\s/.test(u)) return false;
+  if (/^https?:\/\//i.test(u)) return true;
+  return /^[a-z0-9.\-]+(:\d+)?(\/|$)/i.test(u);
+}
+
+function setCeHint(msg, bad) {
+  const el = $("ceHint");
+  if (!el) return;
+  el.textContent = msg || "";
+  el.style.color = bad ? "var(--danger)" : "var(--muted)";
+}
+
+// probeCustomChannel 发一次探测：后端做规范化 + 候选根嗅探 + 能力解析（R121）。
+// 脱敏态的 api_key 原样发出，由后端 resolveCustomKey 按渠道名换成真值。
+function probeCustomChannel(ch) {
+  return api("/api/config/custom_channel_test", { name: ch.name, base_url: ch.base_url, api_key: ch.api_key });
+}
+
+// applyProbeResult 把探测结论落回 target.base_url，并写一行可行动的结论。
+// 失败时必须把试过的地址逐条列出来：只说「连接失败」用户无从知道是 key 错还是路径错。
+function applyProbeResult(res, target, setHint) {
+  if (!res) return;
+  if (res.base_url) target.base_url = res.base_url;
+  const bits = [res.models_ok ? `模型目录 ${(res.models || []).length} 个` : "模型目录不可用",
+    res.chat_ok ? "对话端点存在" : "对话端点未确认"];
+  const tail = res.note ? `；${res.note}` : "";
+  if (res.ok) {
+    setHint(`✓ ${target.base_url} ｜ ${bits.join(" ｜ ")}${tail}`, false);
+  } else {
+    const tried = (res.tries || []).map((t) => `${t.url} → ${t.status || t.err || "?"}`).join("； ");
+    setHint(`✗ ${res.error || "没能确认端点"}（${bits.join(" ｜ ")}）${tail}${tried ? ` ｜ 试过：${tried}` : ""}`, true);
+  }
+}
+
+// sniffInto 探测并把确认后的根写回 target（调用方负责把 target.base_url 同步回表单/列表）。
+async function sniffInto(target, setHint) {
+  if (!target.base_url) {
+    setHint("请先填 Base URL", true);
+    return null;
+  }
+  setHint("正在规范化并向上游确认端点…", false);
+  try {
+    const res = await probeCustomChannel(target);
+    applyProbeResult(res, target, setHint);
+    return res;
+  } catch (e) {
+    setHint("识别失败：" + e.message, true);
+    return null;
+  }
+}
+
+// sniffFromEditor 渠道编辑器里的「🔍 识别端点」：把确认后的根回填进输入框（所见即所存）。
+async function sniffFromEditor() {
+  const t = { name: $("ceName").value.trim().toLowerCase(), base_url: stripQuotes($("ceURL").value), api_key: $("ceKey").value.trim() };
+  const res = await sniffInto(t, setCeHint);
+  if (res && t.base_url) $("ceURL").value = t.base_url;
+  return res;
+}
+
 function saveChannelEditor() {
   const name = $("ceName").value.trim().toLowerCase();
-  const url = $("ceURL").value.trim();
+  const url = stripQuotes($("ceURL").value);
   const key = $("ceKey").value.trim();
   const fail = (m) => { $("ceErr").textContent = m; };
   if (!name) return fail("请填入渠道标识");
   if (!/^[a-zA-Z0-9_\-]+$/.test(name)) return fail("渠道标识仅允许字母、数字、下划线、短横线");
   if (editChIdx < 0 && RESERVED_CHANNEL_NAMES.has(name)) return fail(`渠道标识 ${name} 与内建渠道同名，请另取一个`);
   if (!url) return fail("请填入 Base URL");
-  if (!/^https?:\/\//i.test(url)) return fail("Base URL 必须以 http:// 或 https:// 开头");
+  // 不再硬性要求 https:// 开头（R121）：本地 one-api 常常是 http://127.0.0.1:11434/v1，
+  // 用户从文档里复制的又多是带尾巴的完整地址，交给后端规范化比在这里拦人更合适。
+  if (!looksLikeEndpoint(url)) return fail("Base URL 不像合法地址（形如 api.example.com/v1 或 https://…）");
   if (editChIdx >= 0) {
-    Object.assign(editCustomChannels[editChIdx], { base_url: url.replace(/\/+$/, ""), api_key: key });
+    const ch = editCustomChannels[editChIdx];
+    const changed = ch.base_url !== url || (ch.api_key || "") !== key;
+    Object.assign(ch, { base_url: url, api_key: key });
     closeChannelEditor();
     renderCustomChList();
     $("customChOk").textContent = "已更新，点击「保存全部配置」生效";
     $("customChErr").textContent = "";
+    // 改动过接入点就顺手确认一次（异步，不拦保存）：确认到的根会就地回写。
+    if (changed) sniffInto(ch, (m, bad) => { $("customChErr").textContent = bad ? m : ""; if (!bad) { $("customChOk").textContent = m; renderCustomChList(); } });
     return;
   }
   if (editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
   // enabled 字段后端已废弃（R83 移除「停用」概念），不再写这个死字段。
   const idx = editCustomChannels.length;
-  editCustomChannels.push({ name, base_url: url.replace(/\/+$/, ""), api_key: key, models: [] });
+  editCustomChannels.push({ name, base_url: url, api_key: key, models: [] });
   closeChannelEditor();
   renderCustomChList();
   $("customChErr").textContent = "";
   // 需求②：Provider 一行一key 填完就自动拉一次 /models 并弹勾选列表，
   // 不让用户再「先保存→回列表→点导入」三跳。拉失败也不拦保存（只提一句）。
-  $("customChOk").textContent = "已添加，正在拉取上游模型列表…";
+  $("customChOk").textContent = "已添加，正在规范化并确认端点、拉取模型列表…";
   openModelImport(idx);
 }
 
@@ -2865,9 +2946,15 @@ async function openModelImport(chIdx) {
   $("importList").innerHTML = '<div class="hint">加载中…</div>';
   $("modelImportOverlay").classList.remove("hidden");
   try {
-    const res = await api("/api/config/custom_channel_test", { name: ch.name, base_url: ch.base_url, api_key: ch.api_key });
+    const res = await probeCustomChannel(ch);
+    // 确认过的根就地回写（R121）：用户粘的可能是漏协议头或带 /chat/completions 尾巴的地址。
+    if (res.base_url && res.base_url !== ch.base_url) {
+      ch.base_url = res.base_url;
+      renderCustomChList();
+    }
     if (!res.ok) {
-      $("importErr").textContent = `拉取失败：${res.error || "上游未返回模型列表"}`;
+      const tried = (res.tries || []).map((t) => `${t.url} → ${t.status || t.err || "?"}`).join("； ");
+      $("importErr").textContent = `拉取失败：${res.error || "上游未返回模型列表"}${tried ? `（试过：${tried}）` : ""}`;
       $("importList").innerHTML = "";
       $("importHint").textContent = "";
       return;
@@ -2882,7 +2969,7 @@ async function openModelImport(chIdx) {
       .map((c) => ({ id: c.id, cap: caps ? c : null, exists: have.has(c.id), checked: !have.has(c.id) }));
     const fresh = importCtx.models.filter((m) => !m.exists).length;
     const noCap = importCtx.models.filter((m) => !m.cap).length;
-    $("importHint").textContent = `上游共 ${importCtx.models.length} 个模型，其中 ${fresh} 个未添加。` +
+    $("importHint").textContent = `接入点 ${ch.base_url}${res.chat_ok ? "（对话端点已确认）" : ""}｜上游共 ${importCtx.models.length} 个模型，其中 ${fresh} 个未添加。` +
       (noCap ? `有 ${noCap} 个上游没声明能力，导入后会在列表标「未探测」，需要的话请手动补填。` : "") +
       "勾选后点「导入选中」，再点「保存全部配置」生效。";
     renderImportList();
@@ -2976,7 +3063,7 @@ async function testOczenKey() {
   $("proxyErr").textContent = "";
   try {
     let k = $("oczenKeyInput").value.trim();
-    if (k.includes("…")) k = ""; // 脱敏形态 = 未改动，用当前配置值测
+    if (isMaskedKey(k)) k = ""; // 脱敏形态 = 未改动，用当前配置值测
     const r = await api("/api/config/oczen_test", { api_key: k });
     const via = r.via_backup ? "经备用通道" : "直连";
     if (r.ok) {
@@ -3023,7 +3110,7 @@ async function saveSettings() {
   if (kIn.dataset.touched === "1") {
     let k = kIn.value.trim();
     // 值仍是脱敏形态（含 …）则视为未修改，保持服务端现值
-    if (k && k.includes("…")) k = undefined;
+    if (k && isMaskedKey(k)) k = undefined;
     if (k !== undefined) body.oczen_api_key = k; // undefined 时不携带字段 = 不改动；空串 = 清除回匿名
   }
   try {
@@ -3519,6 +3606,7 @@ function bind() {
 
   // ---- 渠道编辑弹窗（R82） ----
   $("btnCeCancel").onclick = () => closeChannelEditor();
+  $("btnCeSniff").onclick = () => sniffFromEditor(); // R121：规范化 + 确认真实端点，结论回填输入框
   $("btnCeSave").onclick = () => saveChannelEditor();
   $("channelEditorOverlay").onclick = (e) => { if (e.target === $("channelEditorOverlay")) closeChannelEditor(); };
   $("ceURL").onkeydown = (e) => { if (e.key === "Enter") saveChannelEditor(); };

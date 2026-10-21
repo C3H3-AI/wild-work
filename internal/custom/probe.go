@@ -270,31 +270,200 @@ func effortList(m map[string]any, keys []string) []string {
 // 这是**用户自己的第三方端点**，不参与内建渠道的风控账号池，因此不受 §0.1
 // 「严禁穷举探测上游接口」约束；但仍然只发一个请求、不穷举多个候选端点
 // （OpenRouter 式扩展字段本就在同一条 /models 响应里，没有第二个请求的必要）。
+// 需要同时嗅探候选根时用 Discover（请求数仍然封在 6 次以内，见那里的注释）。
 func (c *Client) TestConnection() ([]ModelCap, error) {
-	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + "/models"
-	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	caps, _, err := probeModelsAt(strings.TrimRight(c.cfg.BaseURL, "/"), c.cfg.APIKey)
+	return caps, err
+}
+
+// getAt 发一个带 Bearer 的 GET。响应体限 1 MiB：探测响应可能是网关错误页或 SPA 首页 HTML。
+// 返回 (body, status, err)，status==0 只在传输层失败（DNS/连接/超时）时为 0。
+func getAt(u, key string) ([]byte, int, error) {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if c.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	// 探测是面板上的一次用户点击动作，15s 足够；不等 StreamHTTP（那是对话流用的）。
+	// 探测是面板上的一次用户点击动作，15s 足够；不复用 StreamHTTP（那是对话流用的，无总超时）。
 	hc := &http.Client{Timeout: 15 * time.Second}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("连接失败：%w", err)
+		return nil, 0, fmt.Errorf("连接失败：%v", err)
 	}
 	defer resp.Body.Close()
-	// 上游可能是网关错误页/HTML，限 1 MiB 再判：整段读回只为拼进错误消息（不解析）。
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if rerr != nil {
+		return raw, resp.StatusCode, fmt.Errorf("读取响应失败：%v", rerr)
+	}
+	return raw, resp.StatusCode, nil
+}
+
+// probeModelsAt GET {base}/models。只有 200 且解出至少一个带 id 的条目才算成功；
+// 「200 但解不出条目」也归失败（网关把未知路径兜到首页时就是这形状）。
+func probeModelsAt(base, key string) ([]ModelCap, int, error) {
+	raw, status, err := getAt(base+"/models", key)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败：%w", err)
+		return nil, status, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("上游返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	if status != http.StatusOK {
+		return nil, status, fmt.Errorf("上游返回 HTTP %d: %s", status, snippet(raw))
 	}
-	return parseModelsPayload(raw)
+	caps, err := parseModelsPayload(raw)
+	if err != nil {
+		return nil, status, err
+	}
+	return caps, status, nil
+}
+
+// probeChatAt GET {base}/chat/completions，只问「这条路径存在吗」，**绝不发 POST**
+// （POST 到对话端点会产生真实调用与费用，嗅探阶段无权花用户的钱）。
+// GET 打在 POST-only 路由上，网关一般回 405/400/415，路径不存在才回 404。
+func probeChatAt(base, key string) (int, []byte, error) {
+	body, status, err := getAt(base+"/chat/completions", key)
+	return status, body, err
+}
+
+// chatConfirmed 判「GET /chat/completions 的这个响应能不能说明路由存在」。纯函数，便于单测。
+// 2xx 只在响应体不是一张 HTML 页面时才算数：控制台类站点常对任意未知路径回 200 + SPA
+// 兑底页，拿它当「端点存在」会把填错的地址说成配好了（R121 单测拓到的真缺陷）。
+func chatConfirmed(status int, body []byte) bool {
+	switch {
+	case status == http.StatusNotFound:
+		return false
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return false // 网关在路由前就鉴权失败 ⇒ 401 既可能来自错地址也可能来自对地址，**不能当成「已确认」**（否则填错的 key 会被说成配好了）
+	case status >= 200 && status < 300:
+		t := strings.TrimLeft(string(body), " \t\r\n")
+		return !strings.HasPrefix(t, "<")
+	default:
+		return true // 405/501/415/400/422/429/5xx = 路由在，只是不接受 GET 或当时异常
+	}
+}
+
+// snippet 取响应体前 160 字符进错误消息（只为让人看出是 HTML 还是 JSON 错误）。
+func snippet(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if r := []rune(s); len(r) > 160 {
+		s = string(r[:160]) + "…"
+	}
+	return s
+}
+
+// Try 一次探测的如实记录。失败时逐条列进面板：用户看得懂「到底试了哪几个地址、各回什么」，
+// 而不是只拿到一句「连接失败」。
+type Try struct {
+	URL    string `json:"url"`
+	Status int    `json:"status,omitempty"`
+	Err    string `json:"err,omitempty"`
+}
+
+// Discovery 嗅探结果。Base 一定是 http(s) 合法根（已规范化），调用方应把它回写进配置。
+type Discovery struct {
+	Base     string     `json:"base_url"`
+	Renormed bool       `json:"renormed"` // 做过补协议/去尾巴之类的静态规范化
+	Adjusted bool       `json:"adjusted"` // 确认的根 ≠ 用户填写规范化后的根 ⇒ 面板要提示「已自动定位」
+	ModelsOK bool       `json:"models_ok"`
+	ChatOK   bool       `json:"chat_ok"`
+	Caps     []ModelCap `json:"-"` // 由调用方自己再序列化（handler 回 caps 字段）
+	Tries    []Try      `json:"tries"`
+	Note     string     `json:"note,omitempty"`
+}
+
+// Discover 规范化接入点，并在**封闭的**候选根集合里确认「哪个根 + /chat/completions 是真的」。
+//
+// 为什么需要它：用户粘的地址有三类歧义——漏协议头、带了 /chat/completions 尾巴、
+// 「/v1 到底归不归根」。前两类可以纯静态规范化（NormalizeBaseURL），第三类只有问了上游
+// 才知道，所以这里做有界嗅探：候选根最多 3 个（原样 / 加 /v1 / 去 /v1），
+// 总请求数封顶 3+3=6。不猜任意路径变体（/api/v1、/openai 之类一律不试）。
+//
+// 判读口径（可信度从高到低）：
+//  1. GET {根}/models 回 200 且解出带 id 的条目 ⇒ 命中，顺带拿到能力清单；
+//  2. 所有候选的 /models 都拿不到目录时退一步：{根}/chat/completions 回**非 404 且不是 HTML 页面**
+//     就认定该根存在（网关不开放目录、或 key 无目录权限，都是合法配置）。这条判据是**推断**
+//     （未逐家实测），所以只在 ① 全线落空时才用，并在 Note 里写明确认依据弱；
+//  3. 401/403 单独归「无从判断」：网关在路由前就鉴权失败时，401 既可能来自错地址也可能来自对地址，
+//     拿它当「端点存在」会把填错的 key 说成配好了 ⇒ 直接报错让用户查 key。
+func Discover(cfg ChannelConfig) (*Discovery, error) {
+	norm := NormalizeBaseURL(cfg.BaseURL)
+	d := &Discovery{Base: norm}
+	if norm == "" {
+		return d, fmt.Errorf("接入点不能为空")
+	}
+	if !strings.HasPrefix(norm, "http://") && !strings.HasPrefix(norm, "https://") {
+		return d, fmt.Errorf("接入点 %q 不是合法的 http(s) 地址", cfg.BaseURL)
+	}
+	d.Renormed = !strings.EqualFold(strings.TrimSpace(cfg.BaseURL), norm)
+	cands := BaseCandidates(norm)
+
+	blocked := false // 见过 401/403 ⇒ 结论要说「密钥被拒」而不是「端点不存在」
+	authBlocked := func(status int) bool {
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			blocked = true
+			return true
+		}
+		return false
+	}
+	hit := func(status int) bool { return !authBlocked(status) } // ① 里用：401 不算命中目录
+	rec := func(u string, status int, err error) {
+		t := Try{URL: u, Status: status}
+		if err != nil {
+			t.Err = err.Error()
+		}
+		d.Tries = append(d.Tries, t)
+	}
+
+	// ① 用模型目录定位根
+	for _, b := range cands {
+		caps, status, err := probeModelsAt(b, cfg.APIKey)
+		rec(b+"/models", status, err)
+		if !hit(status) {
+			continue
+		}
+		if err == nil && len(caps) > 0 {
+			d.Base, d.ModelsOK, d.Caps = b, true, caps
+			break
+		}
+	}
+	// ② 目录拿不到 ⇒ 只确认对话端点存在。能不能算「存在」全部交给 chatConfirmed
+	//（401/403 也在那里判掉），这里只额外记一份「见过鉴权被拒」用于结论措辞。
+	if !d.ModelsOK {
+		for _, b := range cands {
+			status, body, err := probeChatAt(b, cfg.APIKey)
+			rec(b+"/chat/completions", status, err)
+			authBlocked(status)
+			if err != nil || !chatConfirmed(status, body) {
+				continue
+			}
+			d.Base, d.ChatOK = b, true
+			d.Note = "上游未开放模型目录，仅按 /chat/completions 端点存在确认了接入点（模型与能力需手填）"
+			break
+		}
+	}
+	if !d.ModelsOK && !d.ChatOK {
+		if blocked {
+			return d, fmt.Errorf("候选地址均回 401/403：api-key 被上游拒绝，端点是否正确无从判断（请核对密钥）")
+		}
+		return d, fmt.Errorf("没能定位到可用的 OpenAI 兼容端点：试了 %d 个地址，均无 /chat/completions", len(d.Tries))
+	}
+	// ③ 目录命中时也补一次对话端点确认（目录与对话分家挂在不同前缀下的网关并不罕见）
+	if d.ModelsOK {
+		status, body, err := probeChatAt(d.Base, cfg.APIKey)
+		rec(d.Base+"/chat/completions", status, err)
+		d.ChatOK = err == nil && chatConfirmed(status, body)
+		switch {
+		case err != nil:
+			d.Note = fmt.Sprintf("模型目录可用，但确认对话端点失败：%v", err)
+		case d.ChatOK:
+		case status == http.StatusUnauthorized || status == http.StatusForbidden:
+			d.Note = fmt.Sprintf("模型目录可用，但对话端点回 HTTP %d：网关可能对其单独鉴权，未能确认（不影响已定位的接入点）", status)
+		default:
+			d.Note = fmt.Sprintf("模型目录在 %s 可用，但该根下 /chat/completions 未确认存在（HTTP %d），对话可能挂在别的前缀下", d.Base, status)
+		}
+	}
+	d.Adjusted = !strings.EqualFold(d.Base, norm)
+	return d, nil
 }
 
 // containsFold 不区分大小写的成员判定（档位已统一小写，这里只防上游脏数据）。
