@@ -353,8 +353,8 @@ func main() {
 	qcmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	mcUp := monkeycode.New()
 	mcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
-	rcUp := raccoon.New()
-	rcUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// 等响应头上限由 NewWithTimeout 统一算（≥180s，R118）；总超时仍取 upstream.timeout_seconds。
+	rcUp := raccoon.NewWithTimeout(time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second)
 	lmUp := loomy.New()
 	lmUp.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	clUp := cline.New()

@@ -45,7 +45,7 @@
 
 ---
 
-## 1. 决议项索引（R1–R117）
+## 1. 决议项索引（R1–R118）
 
 **全文（含证据链、反例、已知限制）见 [`docs/决议项.md`](docs/决议项.md)** —— 改动相关代码前必读对应条目。
 
@@ -416,7 +416,7 @@ bash scripts/probe-dump.sh summarize                # 汇总各渠道 usage 字�
 | [README.md](README.md) | 用户文档 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 开发者文档（面向 AI Agent） |
 | [AGENTS.md](AGENTS.md) | **本文件**：纪律 + 决议索引 + 关键不变量 + 构建发版 |
-| [docs/决议项.md](docs/决议项.md) | **R1–R117 决议全文**（证据链、反例、已知限制） |
+| [docs/决议项.md](docs/决议项.md) | **R1–R118 决议全文**（证据链、反例、已知限制） |
 | [docs/渠道接入备忘.md](docs/渠道接入备忘.md) | 各渠道协议要点、凭据模型、已知限制与踩坑 |
 | [docs/接口参考.md](docs/接口参考.md) | 面板区块规划 + 管理 API 全量清单 |
 | [docs/模型降级链定义.md](docs/模型降级链定义.md) | **模型降级链的唯一权威定义**：三维归因、错误类型全量归属、两条触发路径、三条硬规则、已知限制（R94） |
@@ -451,3 +451,4 @@ rg -o '\]\((docs/[^)]+\.md)\)' -r '$1' AGENTS.md README.md DEVELOPMENT.md \
   | sort -u | while read f; do
   git check-ignore -q "$f" && echo "❌ 未入库（死链）: $f" || echo "✅ $f"
 done
+| R118 | **小浣熊（raccoon）「等响应头」的上限 60s→180s（硬下限），`upstream.timeout_seconds` 只放大不压低**（2026-10-21，用户实测驱动） | **现象**：pi 打 `raccoon/sn-kimi-k3` 间歇性整轮失败，客户端显示 `Error: 502: {"code":"upstream_error","message":"Post \"https://xiaohuanxiong.com/api/web/llm/v2/chat/completions\": net/http: timeout awaiting response headers","type":"api_error"}`；同一会话相邻几轮又正常，表现为「随机偶发」。**取证**：① `data/app.log` 该渠道累计 **235 次**同一错误，每次距 `sticky route` 精确 **60.0s**（例：`15:44:04.66` 派发 → `15:45:04.67` 报错），而 handler 按 R109 把传输层错误判为「不换号、不计账号错误」直接 502 ⇒ 换号/重试都救不回来；② 用本机账号直连上游单发实测（`max_tokens:64` 的极短请求 + `stream:true`）TTFB 三次为 **64.9s / 102.9s / 95.0s**，总耗时 101.5s / >200s / 172.0s —— 上游是**缓冲式网关**：即便请求带 `stream:true`，它也要等深度思考跑到一定阶段才回首字节；③ 所以 60s 不是「偶发抖动」而是**落在上游常态区间内**的阈值，成功那几轮只是恰好 <60s。**根因**：`internal/raccoon/client.go` 的 `newTransport()` 把 `ResponseHeaderTimeout` 写死 60s（流式 client 无总超时，这是唯一兜底），而本渠道刻意「剥离档位、走上游默认最深思考」，首字节天然比其它渠道慢一个量级。**修法**：① 新增 `defaultHeaderTimeout` / `minHeaderTimeout = 180s`，等响应头上限 = `max(minHeaderTimeout, timeout)`；② `New()` 改用下限配置，另留注入路径 `NewWithTimeout(timeout)`，`main.go` 的 `rcUp` 改走它（原先「先 `raccoon.New()` 再回手改 `HTTP.Timeout`」根本影响不到 Transport 里的响应头上限）；③ **流中空闲看门狗维持 90s 不跟着放宽**——拿到响应头之后彻底卡死，多等只是让用户多等（与 R58/R110 同口径）；④ `StreamHTTP` 仍不设总超时（R35 不变量）。**为什么用 `max` 而不是直接读配置**：`upstream.timeout_seconds`（本机 120s）是为**整条请求**设的，拿它去压「等响应头」这一段，会把 100s+ 的长思考首字节重新打成必然失败 —— 这一段只允许放宽。**边界**：非流式 `HTTP.Timeout` 仍取 `upstream.timeout_seconds`（本机 120s，对比缓冲网关 170~200s 的总耗时偏紧，但那是用户可调的既有旋钮，本条不动）；`Aggregate`（非流式）路径同受此限，需要更长就调大 `timeout_seconds`。**回归**：`internal/raccoon/timeout_test.go`（默认/注入 120s/注入 30s 均不得低于 180s、注入 600s 跟随放宽、`StreamHTTP.Timeout` 恒 0、600ms 迟回首字节端到端仍 200）；**变异验证**：两个常量改回 60s，`TestHeaderTimeoutAtLeast180s` 当场变红。`go build ./... && go vet ./... && go test ./...` 全绿（47 包）。**已知限制**：① 180s 仍是常量（按 R58/R110 口径不新增用户概念），要再调就改 `defaultHeaderTimeout`；② 上游首字节常态已到 95~103s，若某天排队加剧越过 180s 仍会 502 —— 那种情况该做的是「等待期间给客户端保活/进度帧」，而不是继续加长超时。 |
