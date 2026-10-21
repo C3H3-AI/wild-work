@@ -130,11 +130,16 @@ func chatHeaders(req *http.Request, a *auth.Auth, conv, turn string) {
 }
 
 func injectAttributionWBAI(req *http.Request) {
+	// 取值与官方桌面客户端一致（R117，本机 WorkBuddy.app 5.8.3 静态解包取证）：
+	// X-Agent-Intent 缺省 craft、X-Product 取 product.json 的 deploymentType（SaaS）、
+	// X-Private-Data 默认 true、X-IDE-Version 是桌面版本而不是 CLI 版本。
+	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", "WorkBuddy")
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", "5.5.4")
-	req.Header.Set("X-Product", "WorkBuddy")
+	req.Header.Set("X-IDE-Version", clientVersion)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("X-Private-Data", "true")
 }
 
 // billingHeaders 余额 / 签到接口头。
