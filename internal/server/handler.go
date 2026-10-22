@@ -439,7 +439,16 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		"input_modalities": mi.InputModalities(),
 		"modality":         mi.Modality(),
 	}
+	var params []string
+	if mi.SupportsTools {
+		params = append(params, "tools", "tool_choice")
+	}
+
 	if len(mi.ReasoningEfforts) > 0 || mi.DefaultReasoningEffort != "" {
+		// PR #189 原本还声明 include_reasoning，本仓**不实现**该参数（全仓零处理点：入站只吃
+		// reasoning_effort 与 Responses 的 reasoning 对象）⇒ 对外宣告一个我们不接的参数，等于
+		// 让客户端按它发而拿到静默忽略，正是 R49「绝不编造」要避免的情形，故剥掉。
+		params = append(params, "reasoning", "reasoning_effort")
 		reasoning := map[string]any{}
 		if len(mi.ReasoningEfforts) > 0 {
 			reasoning["supported_efforts"] = mi.ReasoningEfforts
@@ -449,10 +458,16 @@ func buildModelEntry(k provider.Kind, mi provider.ModelInfo) map[string]any {
 		}
 		if mi.CanDisableThinking != nil {
 			reasoning["can_disable_thinking"] = *mi.CanDisableThinking
+			reasoning["mandatory"] = !(*mi.CanDisableThinking)
 		}
 		entry["reasoning"] = reasoning
 		entry["supports_reasoning"] = true
 	}
+
+	if len(params) > 0 {
+		entry["supported_parameters"] = params
+	}
+
 	return entry
 }
 
