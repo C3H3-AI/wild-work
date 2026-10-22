@@ -27,6 +27,7 @@ type ReleaseInfo struct {
 	Title       string      `json:"title"`
 	Changelog   string      `json:"changelog"`
 	PublishedAt string      `json:"published_at"`
+	HTMLURL     string      `json:"html_url,omitempty"`
 	Asset       *AssetInfo  `json:"asset,omitempty"`
 	AllAssets   []AssetInfo `json:"assets,omitempty"`
 }

@@ -36,7 +36,7 @@ func MatchAsset(assets []AssetInfo, goos, goarch string) (*AssetInfo, error) {
 		}
 	}
 
-	// 2. 宽松前缀匹配（排除安装包文件如 .dmg, .zip, .tar.gz）
+	// 2. 宽松前缀匹配（排除安装包文件如 .dmg, .zip, .tar.gz, .sha256）
 	for _, a := range assets {
 		lower := strings.ToLower(a.Name)
 		if strings.HasSuffix(lower, ".dmg") || strings.HasSuffix(lower, ".zip") ||
@@ -59,21 +59,21 @@ func CurrentPlatformAsset(assets []AssetInfo) (*AssetInfo, error) {
 
 // VerifyDigest 校验目标文件的 SHA256 摘要。
 // digest 格式通常形如 "sha256:d20311620dbe4307a3d5e5a17e5e2a77066a666db02e9d3115b79eb181f4ab36"。
-// 若 digest 为空，则不进行哈希校验（返回 nil）。
+// 严禁跳过摘要校验：若 digest 为空，直接返回错误，防止未受校验的二进制被安装。
 func VerifyDigest(filePath, digest string) error {
 	digest = strings.TrimSpace(digest)
 	if digest == "" {
-		return nil
+		return fmt.Errorf("digest is empty: sha256 digest is strictly required")
 	}
 
 	expectedHex := digest
-	if strings.HasPrefix(strings.ToLower(digest), "sha256:") {
-		expectedHex = strings.TrimPrefix(digest, "sha256:")
-		expectedHex = strings.TrimPrefix(expectedHex, "SHA256:")
+	lower := strings.ToLower(digest)
+	if strings.HasPrefix(lower, "sha256:") {
+		expectedHex = digest[7:]
 	}
 	expectedHex = strings.TrimSpace(expectedHex)
-	if expectedHex == "" {
-		return nil
+	if len(expectedHex) != 64 {
+		return fmt.Errorf("invalid sha256 digest length %d (expected 64 hex chars): %q", len(expectedHex), digest)
 	}
 
 	f, err := os.Open(filePath)

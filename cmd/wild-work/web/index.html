@@ -695,11 +695,11 @@
 </div>
 
 
-<!-- 自动更新弹层 -->
+<!-- 自动更新弹层（R84: 遵循 modal-wide 720px 标准档位；R90: 说明收敛为 ? 角标） -->
 <div class="overlay hidden" id="updateOverlay" style="z-index:110">
-  <div class="modal" style="width:460px">
+  <div class="modal modal-wide" id="updateModal">
     <div class="modal-title">
-      <span id="updateModalTitle">发现新版本</span>
+      <span id="updateModalTitle">系统自动更新</span><span class="help-mark" onclick="event.preventDefault()">?<span class="help-pop"><b>自动更新机制</b><br>· 支持 GitHub 官方直连与加速代理多源探测；<br>· 强制校验 SHA256 完整性摘要，防止文件损坏或中间人篡改；<br>· 下载就绪后由您自主决定重启时机（<b>重启将中断当前进行的对话/请求任务</b>，请在空闲时重启生效）。</span></span>
       <button class="modal-close-btn" id="btnUpdateModalClose" title="关闭">✕</button>
     </div>
     <div class="modal-body" style="padding:14px 0">
@@ -708,7 +708,13 @@
         <span class="hint" id="updateCurrentVer" style="margin:0">（当前 v...）</span>
         <span class="badge" id="updateSizeBadge" style="margin-left:auto;background:var(--card-hover)"></span>
       </div>
-      <div id="updateChangelogBox" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:180px;overflow-y:auto;font-size:12px;line-height:1.6;white-space:pre-wrap;color:var(--text-sec);margin-bottom:12px"></div>
+
+      <!-- 更新中断提醒横条（就绪等待重启时展示） -->
+      <div id="updateReadyNotice" class="hidden" style="background:rgba(234,179,8,0.1);border:1px solid var(--warn);border-radius:6px;padding:10px 12px;margin-bottom:12px;color:var(--warn);font-size:12px;line-height:1.5">
+        ⚠️ <b>新版本已就绪！</b>点击「立即重启生效」将完成平滑切换。<b>重启将中断当前正在进行的对话请求任务</b>，请确认当前无在办请求后再执行重启。
+      </div>
+
+      <div id="updateChangelogBox" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px 14px;max-height:220px;overflow-y:auto;font-size:12px;line-height:1.6;color:var(--text-sec);margin-bottom:12px"></div>
       
       <!-- 进度条（下载中展示） -->
       <div id="updateProgressArea" class="hidden" style="margin-bottom:12px">
@@ -728,6 +734,7 @@
       <div id="updateErrorBox" class="risk-tip hidden" style="margin-bottom:12px"></div>
     </div>
     <div class="modal-actions" style="justify-content:flex-end;gap:8px">
+      <button class="btn small" id="btnUpdateBrowser" title="去浏览器打开 GitHub Release 详情">打开发布页</button>
       <button class="btn small" id="btnUpdateLater">稍后提醒</button>
       <button class="btn small" id="btnUpdateIgnore">忽略此版本</button>
       <button class="btn small primary" id="btnUpdateAction">立即更新</button>

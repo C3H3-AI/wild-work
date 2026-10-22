@@ -20,6 +20,7 @@ type ghReleasePayload struct {
 	Name        string `json:"name"`
 	Body        string `json:"body"`
 	PublishedAt string `json:"published_at"`
+	HTMLURL     string `json:"html_url"`
 	Assets      []struct {
 		Name               string `json:"name"`
 		Size               int64  `json:"size"`
@@ -31,29 +32,28 @@ type ghReleasePayload struct {
 // CheckSources 并行查询多源（直连 GitHub API + 加速代理），取最高版本。
 func CheckSources(ctx context.Context, client *http.Client, repo, currentVer string, proxies []string) (*ReleaseInfo, bool, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 8 * time.Second}
+		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
 		repo = "rockswang/wild-work"
 	}
 
-	// 构造查询源列表
 	type queryTarget struct {
-		name string
-		url  string
+		name  string
+		url   string
 		isAPI bool
 	}
 
 	var targets []queryTarget
-	// 1. 直连 GitHub API
+	// 1. 直连 GitHub 官方 API（权威元数据与 SHA256 来源）
 	targets = append(targets, queryTarget{
 		name:  "github-direct",
 		url:   fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo),
 		isAPI: true,
 	})
 
-	// 2. 经各代理的 GitHub API
+	// 2. 经配置各代理的 GitHub API 镜像（提高版本感知成功率）
 	for _, p := range proxies {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -67,7 +67,7 @@ func CheckSources(ctx context.Context, client *http.Client, repo, currentVer str
 			url:   fmt.Sprintf("%shttps://api.github.com/repos/%s/releases/latest", p, repo),
 			isAPI: true,
 		})
-		// 3. 经代理的 HTML / 302 页面探测
+		// 3. HTML 页面 302 探针（仅作版本感知，无 digest 不直接走自动下载）
 		targets = append(targets, queryTarget{
 			name:  p + "web",
 			url:   fmt.Sprintf("%shttps://github.com/%s/releases/latest", p, repo),
@@ -103,10 +103,14 @@ func CheckSources(ctx context.Context, client *http.Client, repo, currentVer str
 			if bestRelease == nil {
 				bestRelease = rel
 			} else {
-				// 取版本更高的那个；同版本若原先缺少资产而新有资产，则取带资产者
 				cmp := CompareVersions(rel.Version, bestRelease.Version)
-				if cmp > 0 || (cmp == 0 && len(bestRelease.AllAssets) == 0 && len(rel.AllAssets) > 0) {
+				// 优先更高版本；若版本相同，优先选择包含合法 Asset 和 Digest 的权威元数据
+				if cmp > 0 {
 					bestRelease = rel
+				} else if cmp == 0 {
+					if hasValidAsset(rel) && !hasValidAsset(bestRelease) {
+						bestRelease = rel
+					}
 				}
 			}
 		}(tgt)
@@ -118,7 +122,7 @@ func CheckSources(ctx context.Context, client *http.Client, repo, currentVer str
 		return nil, false, fmt.Errorf("all update sources failed: %s", strings.Join(errorsList, "; "))
 	}
 
-	// 尝试匹配当前平台资产
+	// 匹配当前平台二进制资产
 	if len(bestRelease.AllAssets) > 0 {
 		if asset, err := CurrentPlatformAsset(bestRelease.AllAssets); err == nil {
 			bestRelease.Asset = asset
@@ -127,6 +131,18 @@ func CheckSources(ctx context.Context, client *http.Client, repo, currentVer str
 
 	hasUpdate := CompareVersions(bestRelease.Version, currentVer) > 0
 	return bestRelease, hasUpdate, nil
+}
+
+func hasValidAsset(rel *ReleaseInfo) bool {
+	if rel == nil || len(rel.AllAssets) == 0 {
+		return false
+	}
+	for _, a := range rel.AllAssets {
+		if a.Digest != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func fetchReleaseFromTarget(ctx context.Context, client *http.Client, targetURL string, isAPI bool) (*ReleaseInfo, error) {
@@ -165,6 +181,7 @@ func fetchReleaseFromTarget(ctx context.Context, client *http.Client, targetURL 
 			Title:       payload.Name,
 			Changelog:   payload.Body,
 			PublishedAt: payload.PublishedAt,
+			HTMLURL:     payload.HTMLURL,
 		}
 		for _, a := range payload.Assets {
 			rel.AllAssets = append(rel.AllAssets, AssetInfo{
@@ -178,7 +195,6 @@ func fetchReleaseFromTarget(ctx context.Context, client *http.Client, targetURL 
 	}
 
 	// 网页 / 302 页面探测
-	// 检查 Location 或 body 中的 releases/tag/vX.Y.Z
 	loc := resp.Header.Get("Location")
 	if loc != "" {
 		if m := tagRegex.FindStringSubmatch(loc); len(m) > 1 {
@@ -186,6 +202,7 @@ func fetchReleaseFromTarget(ctx context.Context, client *http.Client, targetURL 
 			return &ReleaseInfo{
 				TagName: tag,
 				Version: CleanVersion(tag),
+				HTMLURL: loc,
 			}, nil
 		}
 	}

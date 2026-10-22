@@ -242,7 +242,7 @@ func New(opts Options) (*App, error) {
 		AutoCheck:      opts.Config.Updater.Enabled && opts.Config.Updater.AutoCheck,
 		CheckInterval:  time.Duration(opts.Config.Updater.CheckIntervalHours) * time.Hour,
 	}
-	a.updater = updater.NewService(upCfg, nil)
+	a.updater = updater.NewService(upCfg, nil, nil)
 
 	return a, nil
 }
@@ -623,6 +623,20 @@ func (a *App) Stop() {
 		_ = srv.Shutdown(shutdownCtx)
 	}
 	a.Close()
+}
+
+// Restart 优雅停机并重启应用（用于自更新生效）。
+func (a *App) Restart() {
+	// 给 HTTP 响应写出留 200ms
+	time.Sleep(200 * time.Millisecond)
+	systray.Quit(2 * time.Second)
+	a.Stop() // 停止 HTTP 服务，关闭端口并 flush 账本
+
+	// 此时端口已完全释放，拉起新进程并安全退出
+	if err := updater.LaunchProcess("", os.Args[1:]); err != nil {
+		log.Printf("[updater] launch restarted process failed: %v", err)
+	}
+	os.Exit(0)
 }
 
 // Quit 退出整个程序（Web UI“退出”按钮调用）。
@@ -3930,11 +3944,19 @@ func (a *App) HandleAPI(mux *http.ServeMux) {
 			apiError(w, http.StatusBadRequest, "updater not initialized")
 			return
 		}
-		if err := a.updater.Restart(); err != nil {
-			apiError(w, http.StatusInternalServerError, err.Error())
+		dlPath := a.updater.GetDownloadedPath()
+		if dlPath == "" {
+			apiError(w, http.StatusBadRequest, "no downloaded update package ready")
+			return
+		}
+		// 执行二进制原地原子替换
+		if err := updater.ApplyUpdate(dlPath, ""); err != nil {
+			apiError(w, http.StatusInternalServerError, "apply update failed: "+err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		// 异步触发重启：先优雅停机，释放监听端口与锁，防止 R68 端口冲突
+		go a.Restart()
 	})
 	mux.HandleFunc("POST /api/update/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		if a.updater == nil {

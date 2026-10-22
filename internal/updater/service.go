@@ -20,19 +20,28 @@ type Config struct {
 
 // Service 自动更新管理服务。
 type Service struct {
-	cfg        Config
-	client     *http.Client
-	mu         sync.Mutex
-	state      State
-	cancelDl   context.CancelFunc
-	dismissed  string
-	downloaded string
+	cfg          Config
+	metaClient   *http.Client
+	streamClient *http.Client
+	mu           sync.Mutex
+	state        State
+	cancelDl     context.CancelFunc
+	dismissed    string
+	downloaded   string
 }
 
 // NewService 创建自动更新管理器。
-func NewService(cfg Config, client *http.Client) *Service {
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+// 遵循 R35 纪律：为元数据探测与大文件流式下载分别提供 Client。
+func NewService(cfg Config, metaClient, streamClient *http.Client) *Service {
+	if metaClient == nil {
+		metaClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if streamClient == nil {
+		streamClient = &http.Client{} // R35: 无全局 Timeout
+	} else if streamClient.Timeout != 0 {
+		c := *streamClient
+		c.Timeout = 0
+		streamClient = &c
 	}
 	if cfg.CheckInterval <= 0 {
 		cfg.CheckInterval = 6 * time.Hour
@@ -42,8 +51,9 @@ func NewService(cfg Config, client *http.Client) *Service {
 	}
 
 	return &Service{
-		cfg:    cfg,
-		client: client,
+		cfg:          cfg,
+		metaClient:   metaClient,
+		streamClient: streamClient,
 		state: State{
 			Status:         StatusIdle,
 			CurrentVersion: CleanVersion(cfg.CurrentVersion),
@@ -104,7 +114,7 @@ func (s *Service) Check(ctx context.Context, manual bool) (*State, error) {
 		s.mu.Unlock()
 	}()
 
-	rel, hasUpdate, err := CheckSources(ctx, s.client, repo, currVer, proxies)
+	rel, hasUpdate, err := CheckSources(ctx, s.metaClient, repo, currVer, proxies)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -140,7 +150,8 @@ func (s *Service) Check(ctx context.Context, manual bool) (*State, error) {
 	return &st, nil
 }
 
-// StartDownload 开始后台下载并替换当前二进制。
+// StartDownload 开始下载新版本并校验摘要。
+// 下载完成并不立即替换正在运行的程序，而是置为就绪状态，由用户决定重启时机。
 func (s *Service) StartDownload() error {
 	s.mu.Lock()
 	if s.state.Status == StatusDownloading {
@@ -185,7 +196,7 @@ func (s *Service) StartDownload() error {
 			s.state.Source = source
 		}
 
-		res, err := DownloadAsset(dlCtx, s.client, &asset, proxies, onProgress)
+		res, err := DownloadAsset(dlCtx, s.streamClient, &asset, proxies, onProgress)
 		if err != nil {
 			s.mu.Lock()
 			s.state.Status = StatusFailed
@@ -195,17 +206,8 @@ func (s *Service) StartDownload() error {
 			return
 		}
 
-		// 下载完成，执行替换
-		if err := ApplyUpdate(res.FilePath); err != nil {
-			s.mu.Lock()
-			s.state.Status = StatusFailed
-			s.state.Downloading = false
-			s.state.Error = fmt.Sprintf("apply update failed: %v", err)
-			s.mu.Unlock()
-			return
-		}
-
 		s.mu.Lock()
+		s.downloaded = res.FilePath
 		s.state.Status = StatusReady
 		s.state.Downloading = false
 		s.state.ReadyToRestart = true
@@ -237,15 +239,11 @@ func (s *Service) Dismiss(version string) {
 	s.dismissed = CleanVersion(version)
 }
 
-// Restart 重启以应用更新。
-func (s *Service) Restart() error {
+// GetDownloadedPath 获取已下载校验就绪的更新文件路径。
+func (s *Service) GetDownloadedPath() string {
 	s.mu.Lock()
-	if !s.state.ReadyToRestart {
-		s.mu.Unlock()
-		return fmt.Errorf("update is not ready to restart")
-	}
-	s.mu.Unlock()
-	return Restart()
+	defer s.mu.Unlock()
+	return s.downloaded
 }
 
 // StartBackground 启动后台定期检测 goroutine。
@@ -255,7 +253,6 @@ func (s *Service) StartBackground(ctx context.Context) {
 	}
 
 	go func() {
-		// 启动后延迟 15 秒执行首次检查，避免挤占启动期网络带宽
 		select {
 		case <-ctx.Done():
 			return

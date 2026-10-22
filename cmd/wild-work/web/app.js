@@ -3084,6 +3084,37 @@ function renderUpdateNotice(up) {
   }
 }
 
+function formatChangelogHTML(text) {
+  if (!text) return "<em>暂无更新日志说明</em>";
+  // 轻量格式化 markdown 标题与列表，消除裸露 ### 与 - 符号
+  const lines = text.split("\n");
+  const out = [];
+  let inUl = false;
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("### ")) {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      out.push(`<div style="font-weight:600;font-size:13px;margin:8px 0 4px;color:var(--text)">${esc(trimmed.slice(4))}</div>`);
+    } else if (trimmed.startsWith("## ")) {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      out.push(`<div style="font-weight:700;font-size:14px;margin:10px 0 6px;color:var(--text)">${esc(trimmed.slice(3))}</div>`);
+    } else if (trimmed.startsWith("# ")) {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      out.push(`<div style="font-weight:700;font-size:15px;margin:12px 0 6px;color:var(--text)">${esc(trimmed.slice(2))}</div>`);
+    } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      if (!inUl) { out.push('<ul style="margin:4px 0 6px 18px;padding:0">'); inUl = true; }
+      out.push(`<li style="margin-bottom:3px">${esc(trimmed.slice(2))}</li>`);
+    } else if (trimmed === "") {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+    } else {
+      if (inUl) { out.push("</ul>"); inUl = false; }
+      out.push(`<div style="margin-bottom:4px">${esc(trimmed)}</div>`);
+    }
+  }
+  if (inUl) out.push("</ul>");
+  return out.join("");
+}
+
 function renderUpdateModalContent(st) {
   if (!st) return;
   $("updateTargetVer").textContent = st.latest_version || (st.release && st.release.tag_name) || "新版本";
@@ -3094,17 +3125,26 @@ function renderUpdateModalContent(st) {
   } else {
     $("updateSizeBadge").style.display = "none";
   }
-  $("updateChangelogBox").textContent = (st.release && (st.release.changelog || st.release.title)) || "暂无更新日志说明";
+
+  // 渲染更新日志 HTML
+  const rawChangelog = (st.release && (st.release.changelog || st.release.title)) || "";
+  $("updateChangelogBox").innerHTML = formatChangelogHTML(rawChangelog);
 
   const btnAction = $("btnUpdateAction");
   const btnLater = $("btnUpdateLater");
   const btnIgnore = $("btnUpdateIgnore");
+  const btnBrowser = $("btnUpdateBrowser");
   const progArea = $("updateProgressArea");
+  const readyNotice = $("updateReadyNotice");
   const errBox = $("updateErrorBox");
 
+  const releaseURL = (st.release && st.release.html_url) || "https://github.com/rockswang/wild-work/releases/latest";
+  btnBrowser.onclick = () => window.open(releaseURL, "_blank");
+
   if (st.status === "ready" || st.ready_to_restart) {
-    $("updateModalTitle").textContent = "更新已就绪";
+    $("updateModalTitle").textContent = "更新已就绪（待重启）";
     progArea.classList.add("hidden");
+    readyNotice.classList.remove("hidden");
     errBox.classList.add("hidden");
     btnAction.textContent = "立即重启生效";
     btnAction.disabled = false;
@@ -3113,6 +3153,7 @@ function renderUpdateModalContent(st) {
   } else if (st.status === "downloading" || st.downloading) {
     $("updateModalTitle").textContent = "正在下载更新...";
     progArea.classList.remove("hidden");
+    readyNotice.classList.add("hidden");
     errBox.classList.add("hidden");
     const pct = Math.min(100, Math.max(0, st.progress || 0));
     $("updateProgressPercent").textContent = pct.toFixed(1) + "%";
@@ -3126,6 +3167,7 @@ function renderUpdateModalContent(st) {
   } else if (st.status === "failed") {
     $("updateModalTitle").textContent = "更新失败";
     progArea.classList.add("hidden");
+    readyNotice.classList.add("hidden");
     errBox.classList.remove("hidden");
     errBox.textContent = "更新遇到错误：" + (st.error || "未知失败");
     btnAction.textContent = "重试更新";
@@ -3135,6 +3177,7 @@ function renderUpdateModalContent(st) {
   } else {
     $("updateModalTitle").textContent = "发现新版本";
     progArea.classList.add("hidden");
+    readyNotice.classList.add("hidden");
     errBox.classList.add("hidden");
     btnAction.textContent = "立即更新";
     btnAction.disabled = false;

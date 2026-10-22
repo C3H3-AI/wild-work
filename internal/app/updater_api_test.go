@@ -67,7 +67,7 @@ func TestUpdaterAPICheckWithMockServer(t *testing.T) {
 		Repo:           "test/repo",
 		Proxies:        []string{ts.URL + "/"},
 	}
-	a.updater = updater.NewService(upCfg, ts.Client())
+	a.updater = updater.NewService(upCfg, ts.Client(), ts.Client())
 	mux := panelMux(a)
 
 	w := doReq(mux, "POST", "/api/update/check", "", nil)
