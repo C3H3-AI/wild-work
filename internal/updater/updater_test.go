@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -287,7 +288,9 @@ func TestApplyUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm()&0111 == 0 {
+	// Windows 不存 POSIX exec 位（os.Chmod 对权限位无意义），该断言只在 unix 上有意义。
+	// 本仓主力开发/构建平台是 Windows，不加守卫会让 go test 在 Windows 恒红。
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0111 == 0 {
 		t.Errorf("expected executable permission on %s, got %v", targetBin, fi.Mode().Perm())
 	}
 }

@@ -244,11 +244,14 @@ type Config struct {
 }
 
 // UpdaterConfig 自动更新相关配置。
+// 注意：本能力只在 feat/auto-update 分支提供，master 不含（P0 清单见该分支合并说明）。
+// 默认**关闭**（先合能力、后开默认）：自替换二进制 + 重启是不可逆操作，
+// 在 mac/Linux 打包布局与代理链路的 digest 权威源问题解决之前，不应在无人知情时自动发生。
 type UpdaterConfig struct {
-	Enabled            bool     `json:"enabled"`              // 是否启用更新检测，默认 true
-	AutoCheck          bool     `json:"auto_check"`           // 是否启动及后台定期自动检测，默认 true
-	CheckIntervalHours int      `json:"check_interval_hours"` // 检测间隔小时数，默认 6
-	Repo               string   `json:"repo"`                 // GitHub 仓库，默认 "rockswang/wild-work"
+	Enabled            bool     `json:"enabled"`                    // 是否启用更新检测，默认 false（需用户在 config 里显式打开）
+	AutoCheck          bool     `json:"auto_check"`                 // 是否启动及后台定期自动检测，默认 false
+	CheckIntervalHours int      `json:"check_interval_hours"`       // 检测间隔小时数，默认 6
+	Repo               string   `json:"repo"`                       // GitHub 仓库，默认 "rockswang/wild-work"
 	Proxies            []string `json:"download_proxies,omitempty"` // 公共加速代理前缀列表
 }
 
@@ -284,8 +287,8 @@ func Default() *Config {
 	c.Compat.DefaultChannel = "workbuddy"
 	c.Compat.MaxTokensCap = 32000
 	c.Features.LoopGuard = true // 思考链死循环检测默认开启（面板可关）
-	c.Updater.Enabled = true
-	c.Updater.AutoCheck = true
+	c.Updater.Enabled = false
+	c.Updater.AutoCheck = false
 	c.Updater.CheckIntervalHours = 6
 	c.Updater.Repo = "rockswang/wild-work"
 	c.Updater.Proxies = []string{"https://gh-proxy.com/", "https://ghfast.top/"}

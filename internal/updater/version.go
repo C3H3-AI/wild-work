@@ -16,9 +16,10 @@ func CleanVersion(v string) string {
 
 // CompareVersions 比较两个版本号字符串（支持带或不带 'v' 前缀）。
 // 返回值：
-//   -1: v1 < v2
-//    0: v1 == v2
-//    1: v1 > v2
+//
+//	-1: v1 < v2
+//	 0: v1 == v2
+//	 1: v1 > v2
 //
 // 语义规则（符合 SemVer 2.0.0 规范）：
 // 1. 去除 'v' 前缀。

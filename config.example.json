@@ -43,8 +43,8 @@
     "loop_guard": true
   },
   "updater": {
-    "enabled": true,
-    "auto_check": true,
+    "enabled": false,
+    "auto_check": false,
     "check_interval_hours": 6,
     "repo": "rockswang/wild-work",
     "download_proxies": [
