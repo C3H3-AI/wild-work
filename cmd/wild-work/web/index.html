@@ -568,10 +568,14 @@
       <div class="cfg-row"><label class="cfg-label">Base URL</label>
         <input id="ceURL" class="input grow" placeholder="如 https://api.stepfun.com/step_plan/v1" spellcheck="false"></div>
       <div class="cfg-row"><label class="cfg-label">API Key</label>
-        <input id="ceKey" class="input grow" type="password" placeholder="可选；留空表示无鉴权" spellcheck="false">
-      <div class="hint" id="ceHint" style="margin-top:6px"></div>
-      <div class="hint" id="ceErr" style="color:var(--danger);margin-top:6px"></div></div>
-      <div class="hint" id="ceErr" style="color:var(--danger);margin-top:6px"></div>
+        <div class="row" style="display:flex;gap:6px;align-items:center;flex:1">
+          <input id="ceKey" class="input grow" type="password" placeholder="可选；留空表示无鉴权" spellcheck="false">
+          <button class="btn small" id="btnCeEye" title="显示/隐藏明文（编辑已有渠道时，点一下才向后端取那一条明文）">👁</button>
+        </div></div>
+      <!-- 识别详情与错误单独成行（R122）：端点结论常是一长串（根地址 + 试过哪几个 + 各回什么），
+           塞在 API Key 行里会把输入框挤没，且一行放不下要折行 -->
+      <div class="hint" id="ceHint" style="margin-top:6px;white-space:normal;word-break:break-all"></div>
+      <div class="hint" id="ceErr" style="color:var(--danger);margin-top:6px;white-space:normal;word-break:break-all"></div>
     </div>
     <div class="modal-actions">
       <button class="btn small" id="btnCeSniff" title="规范化地址并在候选根里确认 /chat/completions 与模型目录">🔍 识别端点</button>
@@ -581,69 +585,54 @@
   </div>
 </div>
 
-<!-- 模型管理弹层（R82：某渠道的模型列表 + 增删改，一行一个） -->
-<div class="overlay hidden" id="modelManagerOverlay" style="z-index:110">
-  <div class="modal modal-wide">
-    <div class="modal-title" id="modelManagerTitle">模型管理</div>
+<!-- 模型弹层（R122）：导入与手填合并成一个 tab panel——一个渠道的模型只有两个来路
+     （上游列出来的 / 自己填的），分两个弹窗只会让用户来回找入口。
+     叠在自定义渠道弹层之上：.overlay 基类 z-index 是 100，这里必须更高 -->
+<div class="overlay hidden" id="modelPickOverlay" style="z-index:115">
+  <div class="modal" style="width:640px">
+    <div class="modal-title">
+      模型
+      <span class="help-mark">?<span class="help-pop">「上游列表」直接拿该接入点 <code>/models</code> 返回的清单，点 ＋ 加入；<br>「手动添加」用于上游不开放目录、或要填上游没说但你知道的参数。<br>两种方式都只改编辑态，点主面板「保存」后才热生效。</span></span>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-pick-tab="api">上游列表</button>
+      <button class="tab" data-pick-tab="manual" id="tabPickManual">手动添加 / 编辑</button>
+      <span class="hint" id="pickChName" style="margin-left:auto;align-self:center"></span>
+    </div>
     <div class="modal-body">
-      <div id="modelMgrList" class="model-mgr-list"></div>
-      <div class="hint" id="modelMgrEmpty" style="display:none">（该渠道还没有模型，点「＋ 新增模型」或「导入模型」）</div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn small" id="btnMgrImport">导入模型</button>
-      <button class="btn small" id="btnMgrAdd">＋ 新增模型</button>
-      <button class="btn small" id="btnMgrClose">关闭</button>
-    </div>
-  </div>
-</div>
-
-<!-- 单个模型编辑弹层（R82） -->
-<div class="overlay hidden" id="modelEditorOverlay" style="z-index:120">
-  <div class="modal" style="width:440px">
-    <div class="modal-title" id="modelEditorTitle">新增模型</div>
-    <div class="modal-body">
-      <div class="cfg-row"><label class="cfg-label">模型 ID</label>
-        <input id="meId" class="input grow" placeholder="如 glm-5.3" spellcheck="false"></div>
-      <div class="hint" id="meCapSrc" style="margin:-2px 0 6px"></div>
-      <div class="cfg-row"><label class="cfg-label">上下文</label>
-        <input id="meCtx" class="input grow" placeholder="留空=未探测；可填 1M / 128k / 200000" spellcheck="false"></div>
-      <div class="cfg-row"><label class="cfg-label">最大输出</label>
-        <input id="meOut" class="input grow" placeholder="留空=未探测；可填 64k" spellcheck="false"></div>
-      <div class="cfg-row"><label class="cfg-label">思考档位</label>
-        <input id="meEff" class="input grow" placeholder="如 low, high（逗号分隔，留空=无思考）" spellcheck="false"></div>
-      <div class="cfg-row"><label class="cfg-label">能力</label>
-        <div class="row" style="display:flex;gap:12px;flex-wrap:wrap">
-          <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin:0"><input type="checkbox" id="meImg">识图</label>
-          <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin:0"><input type="checkbox" id="meRsn">思考</label>
-          <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin:0"><input type="checkbox" id="meTools">工具</label>
-        </div></div>
-      <div class="hint" id="meErr" style="color:var(--danger);margin-top:6px"></div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn small" id="btnMeCancel">取消</button>
-      <button class="btn small primary" id="btnMeSave">确定</button>
-    </div>
-  </div>
-</div>
-
-<!-- 模型导入弹层（R81：从自定义渠道的上游 /models 批量勾选导入） -->
-<!-- 叠在自定义渠道弹层之上：.overlay 基类 z-index 是 100，这里必须更高（写 60 会被压在下面） -->
-<div class="overlay hidden" id="modelImportOverlay" style="z-index:110">
-  <div class="modal" style="width:520px">
-    <div class="modal-title">导入模型</div>
-    <div class="modal-body">
-      <div class="hint" id="importHint" style="margin:0 0 8px"></div>
-      <div class="row" style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
-        <input id="importFilter" class="input grow" placeholder="筛选模型名（不区分大小写）" spellcheck="false">
-        <button class="btn small" id="btnImportAll">全选</button>
-        <button class="btn small" id="btnImportNone">全不选</button>
+      <div class="tab-body" id="pickPaneApi">
+        <div class="hint" id="importHint" style="margin:0 0 8px;white-space:normal;word-break:break-all"></div>
+        <div class="row" style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+          <input id="importFilter" class="input grow" placeholder="筛选模型名（不区分大小写）" spellcheck="false">
+          <button class="btn small" id="btnImportAgain" title="重新拉一次上游 /models（端点或密钥改过、或上游新上了模型时用）">↻ 重新拉取</button>
+        </div>
+        <div id="importList" class="import-list"></div>
+        <div class="hint" id="importErr" style="color:var(--danger);margin-top:6px;white-space:normal;word-break:break-all"></div>
       </div>
-      <div id="importList" class="import-list"></div>
-      <div class="hint" id="importErr" style="color:var(--danger);margin-top:6px"></div>
+      <!-- 手填 pane（原 modelEditorOverlay 表单内联到这里，字段 id 不变） -->
+      <div class="tab-body hidden" id="pickPaneManual">
+        <div class="cfg-row"><label class="cfg-label">模型 ID</label>
+          <input id="meId" class="input grow" placeholder="如 glm-5.3" spellcheck="false"></div>
+        <div class="hint" id="meCapSrc" style="margin:-2px 0 6px"></div>
+        <div class="cfg-row"><label class="cfg-label">上下文</label>
+          <input id="meCtx" class="input grow" placeholder="留空=未探测；可填 1M / 128k / 200000" spellcheck="false"></div>
+        <div class="cfg-row"><label class="cfg-label">最大输出</label>
+          <input id="meOut" class="input grow" placeholder="留空=未探测；可填 64k" spellcheck="false"></div>
+        <div class="cfg-row"><label class="cfg-label">思考档位</label>
+          <input id="meEff" class="input grow" placeholder="如 low, high（逗号分隔，留空=无思考）" spellcheck="false"></div>
+        <div class="cfg-row"><label class="cfg-label">能力</label>
+          <div class="row" style="display:flex;gap:12px;flex-wrap:wrap">
+            <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin:0"><input type="checkbox" id="meImg">识图</label>
+            <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin:0"><input type="checkbox" id="meRsn">思考</label>
+            <label class="hint" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin:0"><input type="checkbox" id="meTools">工具</label>
+          </div></div>
+        <div class="hint" id="meErr" style="color:var(--danger);margin-top:6px"></div>
+      </div>
     </div>
     <div class="modal-actions">
-      <button class="btn small" id="btnImportCancel">取消</button>
-      <button class="btn small primary" id="btnImportConfirm">导入选中</button>
+      <span class="hint" id="pickStatus" style="margin-right:auto;color:var(--ok)"></span>
+      <button class="btn small primary" id="btnMeSave">添加此模型</button>
+      <button class="btn small" id="btnPickClose">关闭</button>
     </div>
   </div>
 </div>

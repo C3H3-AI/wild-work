@@ -1309,7 +1309,61 @@ function feeChannelAccessHtml(ch) {
       data-copy="${esc(ch.base_url)}" title="点击复制接入点：${esc(ch.base_url)}">${esc(ch.base_url)}</code>
     <span class="fee-access-k">api-key</span><code class="fee-access-v fee-copy-key" role="button" tabindex="0"
       data-ch="${esc(ch.channel)}" title="点击复制完整 api-key（此时才向后端取明文，不批量下发）">${esc(key)}</code>
+    <!-- R122：「显示全部模型」开关——默认关（只列已添加的），打开则**立即**拉一次该渠道 /models，
+         把上游全部模型（含能力）列在旁边，不写进配置。包在 span 里而不是写进 .switch：
+         .switch 本身是 42x24 的定位盒子，把文字塞进去会被clip 掉 -->
+    <span class="fee-all-wrap" title="打开后立即拉取该接入点的 /models，列出全部可添加模型与能力（只展示，不写入配置）">
+      <label class="switch"><input type="checkbox" data-allmodels="${esc(ch.channel)}"${feeShowAll.has(ch.channel) ? " checked" : ""}><span class="slider"></span></label>
+      <span class="fee-access-k">显示全部模型</span>
+    </span>
   </div>`;
+}
+
+// feeShowAll / feeAllData：费率页「显示全部模型」的开关状态与拉取结果。
+// renderFees 每 30s 随 loadFees 重渲染，这两个集合必须活在模块级，否则开关一刷新就丢。
+const feeShowAll = new Set();
+const feeAllData = {};
+
+// feeAllBoxHtml 渲染拉取结果：已添加的标「已添加」，未添加的标「未添加」（只展示，
+// 真要添加回自定义渠道面板点「＋ 模型」）。能力沿用 capSummaryHtml，不编造默认值。
+function feeAllBoxHtml(chName) {
+  const d = feeAllData[chName];
+  if (!d) return `<div class="fee-all-box"><span class="hint">（正在拉取…）</span></div>`;
+  if (d.err) return `<div class="fee-all-box"><span class="hint" style="color:var(--danger)">${esc(d.err)}</span></div>`;
+  const rows = d.rows.map((r) => `<span class="fee-all-item${r.added ? " added" : ""}" title="${r.added ? "已添加，可直接使用" : "尚未添加：回「自定义模型」面板点「＋ 模型」加入"}">` +
+    `<code>${esc(r.id)}</code>${capSummaryHtml(r.cap)}${r.added ? "" : "<span class=\"cm-meta cap-unknown\">未添加</span>"}</span>`).join("");
+  return `<div class="fee-all-box"><div class="hint">共 ${d.rows.length} 个（点接入点行的开关可收起）</div>${rows}</div>`;
+}
+
+// toggleFeeAllModels 开关切换：打开时**才**发探测请求（费率页每 30s 轮询，不得把它变常开）。
+// api_key 传脱敏串，后端按渠道名换成真值（与「列表永不收明文」同一口径）。
+async function toggleFeeAllModels(chName, on) {
+  if (!on) { delete feeAllData[chName]; feeShowAll.delete(chName); rerenderFees(); return; }
+  feeShowAll.add(chName);
+  const ch = (renderFees.last || {}).channels ? renderFees.last.channels.find((c) => c.channel === chName) : null;
+  rerenderFees();
+  if (!ch || !ch.base_url) { feeAllData[chName] = { err: "该渠道没有可探测的接入点" }; return void rerenderFees(); }
+  try {
+    const res = await api("/api/config/custom_channel_test", { name: chName, base_url: ch.base_url, api_key: ch.api_key_masked || "" });
+    if (!res || !res.ok) {
+      const tried = ((res && res.tries) || []).map((t) => `${t.url} → ${t.status || t.err || "?"}`).join("； ");
+      feeAllData[chName] = { err: `拉取失败：${(res && res.error) || "上游未返回模型列表"}${tried ? `（试过：${tried}）` : ""}` };
+    } else {
+      // 费率行的 ID 带渠道前缀（`ch/model`，R52），而上游 /models 回的是裸名 ⇒ 比前先剥前缀
+      const bare = (id) => (id && id.startsWith(chName + "/") ? id.slice(chName.length + 1) : id);
+      const added = new Set((ch.models || []).map((m) => bare(m.id || m.model)));
+      const list = res.caps && res.caps.length ? res.caps : (res.models || []).map((id) => ({ id }));
+      feeAllData[chName] = { rows: list.map((c) => ({ id: c.id, cap: c.cap_source ? c : null, added: added.has(c.id) })) };
+    }
+  } catch (e) {
+    feeAllData[chName] = { err: `拉取失败：${e.message}` };
+  }
+  if (feeShowAll.has(chName)) rerenderFees();
+}
+
+// rerenderFees 重画费率区（开关状态变了就得重画）：没有缓存过数据时什么都不做。
+function rerenderFees() {
+  if (renderFees.last) renderFees(renderFees.last);
 }
 
 // copyCustomKey 复制某个自定义渠道的**完整** api-key（R119）：面板平时只拿到脱敏串，
@@ -1328,6 +1382,7 @@ async function copyCustomKey(name) {
 function renderFees(fees) {
   const box = $("feesBox");
   const channels = fees.channels || [];
+  renderFees.last = fees; // 开关重拉后要能原地重画
 
   if (channels.length === 0) {
     box.innerHTML = `<div class="note">${esc(fees.note || "")}</div>
@@ -1495,7 +1550,10 @@ function renderFees(fees) {
       const id2 = modelCellHtml(m2, ch.channel);
       html += `<tr><td>${id1}</td><td>${rateCell(m1)}</td><td>${id2}</td><td>${rateCell(m2)}</td></tr>`;
     }
-    html += `</tbody></table></div>`;
+    html += `</tbody></table>`;
+    // 「显示全部模型」开着就把拉取结果列在表格下面（R122）
+    if (feeShowAll.has(ch.channel)) html += feeAllBoxHtml(ch.channel);
+    html += `</div>`;
   }
 
   html += `<div class="note" style="margin-top:8px">${esc(fees.disclaimer || "")}</div>`;
@@ -1540,6 +1598,12 @@ function bindFeesTabs() {
         if (p.dataset.feepanel === ch) { p.classList.remove("hidden"); }
         else { p.classList.add("hidden"); }
       });
+  });
+  // 「显示全部模型」开关（R122）：用 change 委托，开关状态存模块级，重渲染不丢。
+  // 不得放 click：label 包住 input 时 click 会被 label 转发再冒泡一次，双重切换。
+  box.addEventListener("change", (e) => {
+    const sw = e.target.closest && e.target.closest("input[data-allmodels]");
+    if (sw) toggleFeeAllModels(sw.dataset.allmodels, sw.checked);
   });
   // 键盘可达：模型名支持 Enter/Space 复制（与 role="button" 对应）。
   box.addEventListener("keydown", (e) => {
@@ -2413,7 +2477,7 @@ function formatTokenCount(num) {
 // 措辞与费率页 capText() 共用同一套语义，不在两处另维护名单。
 function capSourceTag(src) {
   const s = src || "unknown";
-  const map = { api: ["上游", "cap-api", "能力/上下文来自上游 /models 声明"], user: ["手填", "cap-user", "能力/上下文由您在面板手填（本工具不核实）"], unknown: ["未探测", "cap-unknown", "未拿到能力信息：点「导入」拉一次上游 /models；不编造默认值"] };
+  const map = { api: ["上游", "cap-api", "能力/上下文来自上游 /models 声明"], user: ["手填", "cap-user", "能力/上下文由您在面板手填（本工具不核实）"], unknown: ["未探测", "cap-unknown", "未拿到能力信息：点「＋ 模型」拉一次上游 /models；不编造默认值"] };
   const [txt, cls, tip] = map[s] || map.unknown;
   return `<span class="cm-meta ${cls}" title="${esc(tip)}">${txt}</span>`;
 }
@@ -2463,12 +2527,11 @@ function renderCustomChList() {
           <span class="cm-meta">${models.length} 个模型</span>
         </div>
         <button class="btn small cm-btn-edit" data-edit-custom="${i}">编辑</button>
-        <button class="btn small cm-btn-import" data-import-custom="${i}" title="拉取该渠道 /models 返回的模型清单，勾选后批量加入（已有的自动跳过）">导入</button>
-        <button class="btn small cm-btn-add" data-add-model-in="${i}">＋ 模型</button>
+        <button class="btn small cm-btn-add" data-add-model-in="${i}" title="打开模型面板：默认是上游 /models 清单（点 ＋ 加入），第二个页签手填/编辑">＋ 模型</button>
         <button class="btn small danger cm-btn-del" data-del-custom="${i}">删除</button>
       </div>
       <div class="cm-models">
-        ${modelRows || '<div class="cm-model-row cm-empty-row"><span class="hint" style="margin:0">（该 Provider 还没有模型，点「＋ 模型」或「导入」）</span></div>'}
+        ${modelRows || '<div class="cm-model-row cm-empty-row"><span class="hint" style="margin:0">（该 Provider 还没有模型，点「＋ 模型」）</span></div>'}
       </div>
     </div>`;
   }).join("");
@@ -2627,16 +2690,23 @@ function closeSettings() {
 // ---------- 渠道编辑弹窗（R82） ----------
 // 主列表只做一行展示，新增/修改渠道都走这个弹窗。
 // editChIdx = -1 表示新增；>=0 表示修改 editCustomChannels[editChIdx]。
+// ceKeyPlain 只活在这个弹窗开关闭期间（R122 眼睛）：明文不回写列表/配置对象，
+// 配置里永远只存用户填的或后端下发的脱敏串，关窗即清。
 let editChIdx = -1;
+let ceKeyPlain = "";
 
 function openChannelEditor(idx) {
   editChIdx = typeof idx === "number" ? idx : -1;
   const ch = editChIdx >= 0 ? editCustomChannels[editChIdx] : null;
   $("channelEditorTitle").textContent = ch ? "编辑渠道" : "新增渠道";
   $("ceName").value = ch ? ch.name : "";
-  $("ceName").disabled = !!ch;      // 渠道标识是模型前缀，改名等于换路由，不允许就地改
+  // R122：放开渠道标识可改（旧版直接 disabled）。改名等于换路由，代价在保存时
+  // 弹确认告知，并由后端级联 config 引用 / 隔离旧 state 快照。
+  $("ceName").disabled = false;
   $("ceURL").value = ch ? ch.base_url : "";
   $("ceKey").value = ch ? (ch.api_key || "") : "";
+  $("ceKey").type = "password"; // 明文不默认展开，眼睛点一下才取
+  ceKeyPlain = "";
   $("ceErr").textContent = "";
   setCeHint("");
   $("channelEditorOverlay").classList.remove("hidden");
@@ -2646,6 +2716,37 @@ function openChannelEditor(idx) {
 function closeChannelEditor() {
   $("channelEditorOverlay").classList.add("hidden");
   editChIdx = -1;
+  // 明文不得留在 DOM 里等下一次开窗被误提交（R122）。
+  $("ceKey").value = "";
+  $("ceKey").type = "password";
+  ceKeyPlain = "";
+}
+
+// toggleCeKeyEye API Key 旁的眼睛（R122：编辑态也能看明文，与「点复制取原文」同一口径）。
+// 新增态框里就是用户刚打的字，直接切 type、**不发请求**；
+// 编辑态框里是后端下发的脱敏串，只能那一下按需取回明文。
+async function toggleCeKeyEye() {
+  const inp = $("ceKey");
+  if (inp.type === "text") { inp.type = "password"; setCeHint(""); return; }
+  const name = editChIdx >= 0 ? (editCustomChannels[editChIdx] || {}).name : "";
+  if (!isMaskedKey(inp.value)) {           // 没配 key / 刚填的明文：就地显示
+    inp.type = "text";
+    setCeHint("");
+    return;
+  }
+  if (!name) return setCeHint("请先填渠道标识并保存后再取明文", true);
+  if (ceKeyPlain) { inp.value = ceKeyPlain; inp.type = "text"; return; }
+  setCeHint("正在取回明文…", false);
+  try {
+    const res = await api("/api/config/custom_channel_key", { name });
+    if (!res.ok || !res.api_key) { setCeHint("该渠道未配置 api-key", true); return; }
+    ceKeyPlain = res.api_key;
+    inp.value = ceKeyPlain;
+    inp.type = "text";
+    setCeHint("已显示明文（只有这一条，不随列表下发）", false);
+  } catch (e) {
+    setCeHint("取明文失败：" + e.message, true);
+  }
 }
 
 // stripQuotes 去掉首尾成对引号/反引号：从 markdown 代码块或 curl 示例里粘地址常见。
@@ -2725,25 +2826,30 @@ async function sniffFromEditor() {
 function saveChannelEditor() {
   const name = $("ceName").value.trim().toLowerCase();
   const url = stripQuotes($("ceURL").value);
-  const key = $("ceKey").value.trim();
+  const key = ceKeyPlain || $("ceKey").value.trim(); // 眼睛取回的明文以它为准（R122）
   const fail = (m) => { $("ceErr").textContent = m; };
   if (!name) return fail("请填入渠道标识");
   if (!/^[a-zA-Z0-9_\-]+$/.test(name)) return fail("渠道标识仅允许字母、数字、下划线、短横线");
-  if (editChIdx < 0 && RESERVED_CHANNEL_NAMES.has(name)) return fail(`渠道标识 ${name} 与内建渠道同名，请另取一个`);
+  if (RESERVED_CHANNEL_NAMES.has(name)) return fail(`渠道标识 ${name} 与内建渠道同名，请另取一个`);
   if (!url) return fail("请填入 Base URL");
   // 不再硬性要求 https:// 开头（R121）：本地 one-api 常常是 http://127.0.0.1:11434/v1，
   // 用户从文档里复制的又多是带尾巴的完整地址，交给后端规范化比在这里拦人更合适。
   if (!looksLikeEndpoint(url)) return fail("Base URL 不像合法地址（形如 api.example.com/v1 或 https://…）");
   if (editChIdx >= 0) {
     const ch = editCustomChannels[editChIdx];
+    if (name !== ch.name && editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
     const changed = ch.base_url !== url || (ch.api_key || "") !== key;
-    Object.assign(ch, { base_url: url, api_key: key });
+    const renamed = name !== ch.name;
+    // 改名要用户自己知情：历史流水留在旧名、旧前缀请求立即 400（本工具不做 alias）。
+    if (renamed && !confirm(`把渠道标识 ${ch.name} 改为 ${name}？\n\n· 以 ${ch.name}/ 开头的模型 ID 需改成 ${name}/…（旧前缀会报 unknown channel）\n· 历史用量/积分流水仍记在 ${ch.name} 下，不会跟着改`)) return;
+    if (renamed) pendingRenames.push({ new: name, old: ch.name });
+    Object.assign(ch, { name, base_url: url, api_key: key });
     closeChannelEditor();
     renderCustomChList();
-    $("customChOk").textContent = "已更新，点击「保存全部配置」生效";
+    $("customChOk").textContent = renamed ? `已改名为 ${name}，点「保存全部配置」生效` : "已更新，点击「保存全部配置」生效";
     $("customChErr").textContent = "";
     // 改动过接入点就顺手确认一次（异步，不拦保存）：确认到的根会就地回写。
-    if (changed) sniffInto(ch, (m, bad) => { $("customChErr").textContent = bad ? m : ""; if (!bad) { $("customChOk").textContent = m; renderCustomChList(); } });
+    if (changed || renamed) sniffInto(ch, (m, bad) => { $("customChErr").textContent = bad ? m : ""; if (!bad) { $("customChOk").textContent = m; renderCustomChList(); } });
     return;
   }
   if (editCustomChannels.some((c) => c.name.toLowerCase() === name)) return fail(`已存在同名渠道 ${name}`);
@@ -2756,85 +2862,153 @@ function saveChannelEditor() {
   // 需求②：Provider 一行一key 填完就自动拉一次 /models 并弹勾选列表，
   // 不让用户再「先保存→回列表→点导入」三跳。拉失败也不拦保存（只提一句）。
   $("customChOk").textContent = "已添加，正在规范化并确认端点、拉取模型列表…";
-  openModelImport(idx);
+  openModelPick(idx, "api");
 }
 
-// ---------- 模型管理弹窗（R82） ----------
-// 一行一个模型；新增/修改走 modelEditorOverlay（第三层），删除就地生效。
-let mgrChIdx = -1;
-let editModelIdx = -1;
+// ---------- 模型面板（R122：导入与手填合并成一个 tab panel） ----------
+// 旧版是三个弹窗（模型管理 / 单模型编辑 / 导入勾选）。一个渠道的模型只有两个来路
+// （上游列出来的 / 自己填的），分三个入口只会让用户来回找；列表也从「勾选 → 导入选中」
+// 改成逐行 ＋/− 立即增删：勾完还是要点保存，中间那步没有意义。
+let mgrChIdx = -1;      // 当前面板服务的渠道（editCustomChannels 下标）
+let editModelIdx = -1;  // 手填页签正在编辑的模型下标（-1=新增）
+let pickTab = "api";
+let pendingRenames = [];
+// upstreamModels 只存拉到的原始条目 {id, cap}；「是否已添加」渲染时现算，
+// 不在这里夹 exists/checked 状态，否则增删后要同步两处必漂移。
+let upstreamModels = [];
 
-function renderModelManager() {
+function openModelPick(idx, tab, modelIdx) {
+  const ch = editCustomChannels[idx];
+  if (!ch) return;
+  mgrChIdx = idx;
+  pickTab = tab === "manual" ? "manual" : "api";
+  editModelIdx = typeof modelIdx === "number" ? modelIdx : -1;
+  $("modelPickOverlay").classList.remove("hidden");
+  if (pickTab === "manual") {
+    // 从模型行「编辑」进来时只想改个能力，不该顺手打上游一发请求（手填页签自绘表单）
+    openModelEditor(editModelIdx);
+  } else {
+    switchPickTab("api");
+    loadUpstreamModels();
+  }
+}
+
+// switchPickTab 切页签：只改可见性，不重拉上游（重新拉靠「↻」按钮）。
+function switchPickTab(tab) {
+  pickTab = tab === "manual" ? "manual" : "api";
+  document.querySelectorAll("#modelPickOverlay [data-pick-tab]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.pickTab === pickTab);
+  });
+  $("pickPaneApi").classList.toggle("hidden", pickTab !== "api");
+  $("pickPaneManual").classList.toggle("hidden", pickTab !== "manual");
+  const ch = editCustomChannels[mgrChIdx];
+  $("pickChName").textContent = ch ? `${ch.name}（已配置 ${(ch.models || []).length} 个）` : "";
+  $("btnMeSave").textContent = editModelIdx >= 0 ? "保存此模型" : "添加此模型";
+}
+
+function closeModelPick() {
+  $("modelPickOverlay").classList.add("hidden");
+  $("meId").value = "";
+  upstreamModels = [];
+  mgrChIdx = -1;
+  editModelIdx = -1;
+}
+
+// renderImportList 上游清单逐行：行尾一个 ＋/− 按钮（未添加＝＋，已添加＝－），
+// 已添加的行另给「更新能力」（把旧版编造的默认值洗成上游真值）。
+function renderImportList() {
+  const ch = editCustomChannels[mgrChIdx];
+  if (!ch) { $("importList").innerHTML = ""; return; }
+  const have = new Set((ch.models || []).map((m) => (typeof m === "string" ? m : m.id)));
+  const kw = $("importFilter").value.trim().toLowerCase();
+  const rows = upstreamModels.map((m, i) => {
+    if (kw && !m.id.toLowerCase().includes(kw)) return "";
+    const on = have.has(m.id);
+    const btn = on
+      ? `<button class="btn small danger" data-pick-toggle="${i}" title="从本渠道移除该模型">－</button>` +
+        `<button class="btn small cm-btn-cap" data-apply-cap="${i}"${m.cap ? "" : " disabled"} title="${m.cap ? "用本次拉到的上游能力覆写已存模型（不动模型 ID）" : "本次未拉到该模型的能力信息"}">更新能力</button>`
+      : `<button class="btn small primary" data-pick-toggle="${i}" title="加入本渠道（写入配置仍需点「保存」）">＋</button>`;
+    return `<div class="import-row${on ? " picked" : ""}"><label class="import-name"><code>${esc(m.id)}</code>${capSummaryHtml(m.cap)}</label>${btn}</div>`;
+  }).join("");
+  $("importList").innerHTML = rows || '<div class="hint">（没有匹配的模型）</div>';
+  switchPickTab(pickTab); // 同步标题里的「已配置 N 个」与按钮文案
+}
+
+// togglePickModel 行尾 ＋/−：直接改编辑态（与删模型行一致，统一由「保存」落盘）。
+function togglePickModel(i) {
+  const ch = editCustomChannels[mgrChIdx];
+  const row = upstreamModels[i];
+  if (!ch || !row) return;
+  ch.models = ch.models || [];
+  const k = ch.models.findIndex((m) => (typeof m === "string" ? m : m.id) === row.id);
+  if (k >= 0) {
+    ch.models.splice(k, 1);
+    $("customChOk").textContent = `已移除 ${row.id}，点「保存」生效`;
+  } else {
+    ch.models.push(row.cap ? capToModelConfig(row.cap) : { id: row.id });
+    $("customChOk").textContent = `已添加 ${row.id}，点「保存」生效`;
+  }
+  renderCustomChList();
+  renderImportList();
+}
+
+// loadUpstreamModels 拉一次该渠道的上游目录（后端已做规范化 + 候选根嗅探 + 能力解析）。
+async function loadUpstreamModels() {
   const ch = editCustomChannels[mgrChIdx];
   if (!ch) return;
-  const models = ch.models || [];
-  $("modelManagerTitle").textContent = `模型管理 — ${ch.name}（${models.length}）`;
-  $("modelMgrEmpty").style.display = models.length ? "none" : "";
-  $("modelMgrList").innerHTML = models.map((m, j) => {
-    const mid = typeof m === "string" ? m : m.id;
-    const ctxNum = typeof m === "object" ? parseTokens(m.context_window, 0) : 0;
-    const outNum = typeof m === "object" ? parseTokens(m.max_tokens, 0) : 0;
-    const ctx = ctxNum ? formatTokenCount(ctxNum) : "—";
-    const out = outNum ? formatTokenCount(outNum) : "—";
-    const efforts = typeof m === "object" && m.reasoning_efforts ? m.reasoning_efforts : [];
-    const caps = [];
-    if (typeof m === "object" && m.supports_images) caps.push("识图");
-    if (typeof m === "object" && (m.supports_reasoning || efforts.length)) caps.push("思考");
-    if (typeof m !== "object" || m.supports_tools !== false) caps.push("工具");
-    const effTxt = efforts.length ? `思考 ${efforts.join("/")}` : "";
-    return `<div class="model-mgr-row">
-      <code title="${esc(mid)}">${esc(mid)}</code>
-      ${capSourceTag(typeof m === "object" ? m.cap_source : "")}
-      <span class="mm-meta">${esc(ctx)} / ${esc(out)}</span>
-      ${effTxt ? `<span class="tag ok">${esc(effTxt)}</span>` : ""}
-      <span class="mm-meta">${esc(caps.join("·") || "—")}</span>
-      <button class="btn small" data-edit-model="${j}">编辑</button>
-      <button class="btn small danger" data-del-model="${j}" title="移除该模型">删除</button>
-    </div>`;
-  }).join("");
+  upstreamModels = [];
+  $("importHint").textContent = `从 ${ch.base_url} 的 /models 拉取…`;
+  $("importErr").textContent = "";
+  $("importList").innerHTML = '<div class="hint">加载中…</div>';
+  try {
+    const res = await probeCustomChannel(ch);
+    // 确认过的根就地回写（R121）：用户粘的可能是漏协议头或带 /chat/completions 尾巴的地址。
+    if (res.base_url && res.base_url !== ch.base_url) {
+      ch.base_url = res.base_url;
+      renderCustomChList();
+    }
+    $("importList").innerHTML = "";
+    if (!res.ok) {
+      const tried = (res.tries || []).map((t) => `${t.url} → ${t.status || t.err || "?"}`).join("； ");
+      $("importErr").textContent = `拉取失败：${res.error || "上游未返回模型列表"}${tried ? `（试过：${tried}）` : ""}`;
+      $("importHint").textContent = res.base_url ? `接入点 ${res.base_url}` : "";
+      return;
+    }
+    const caps = res.caps && res.caps.length ? res.caps : null;
+    const list = caps || (res.models || []).filter((id) => id).map((id) => ({ id }));
+    upstreamModels = list.filter((c) => c && c.id).map((c) => ({ id: c.id, cap: caps ? c : null }));
+    const noCap = upstreamModels.filter((m) => !m.cap).length;
+    $("importHint").textContent = `接入点 ${ch.base_url}${res.chat_ok ? "（对话端点已确认）" : ""}｜上游共 ${upstreamModels.length} 个模型。` +
+      (noCap ? `有 ${noCap} 个上游没声明能力，加入后会标「未探测」，需要的话请手动补填。` : "") +
+      "点行尾 ＋ 加入，－ 移除。";
+    renderImportList();
+  } catch (e) {
+    $("importErr").textContent = `拉取失败：${e.message}`;
+    $("importList").innerHTML = "";
+  }
 }
 
-function openModelManager(idx) {
-  mgrChIdx = idx;
-  renderModelManager();
-  $("modelManagerOverlay").classList.remove("hidden");
-}
-
-function closeModelManager() {
-  $("modelManagerOverlay").classList.add("hidden");
-  mgrChIdx = -1;
-}
-
+// ---------- 手填/编辑模型（R122：不再独立弹窗，住在模型面板第 2 个页签） ----------
 function openModelEditor(modelIdx) {
   const ch = editCustomChannels[mgrChIdx];
   if (!ch) return;
   editModelIdx = typeof modelIdx === "number" ? modelIdx : -1;
   const m = editModelIdx >= 0 ? ch.models[editModelIdx] : null;
   const o = typeof m === "object" && m ? m : {};
-  $("modelEditorTitle").textContent = m ? "编辑模型" : "新增模型";
   $("meId").value = m ? (typeof m === "string" ? m : m.id) : "";
   // 默认值一律留空：旧版新建时预填「1M / 64k / 三能力全勾」，保存即变成「上游声明」写进配置
-  // 并进 /v1/models（R49 禁止编造）。拉不到就空着，由「导入」从上游拿或由用户自己填。
+  // 并进 /v1/models（R49 禁止编造）。拉不到就空着，由上游列表页签从上游拿或由用户自己填。
   $("meCtx").value = o.context_window ? formatTokenCount(parseTokens(o.context_window, 0)) : "";
   $("meOut").value = o.max_tokens ? formatTokenCount(parseTokens(o.max_tokens, 0)) : "";
   $("meEff").value = (o.reasoning_efforts || []).join(", ");
   $("meImg").checked = !!o.supports_images;
   $("meRsn").checked = !!o.supports_reasoning || (o.reasoning_efforts || []).length > 0;
   $("meTools").checked = typeof m === "string" ? true : o.supports_tools !== false;
-  // 来源提标：告知当前这份能力是上游声明还是手填（保存后会被改标为「手填」）
   $("meErr").textContent = "";
+  if (!$("modelPickOverlay").classList.contains("hidden") || m) switchPickTab("manual");
   if ($("meCapSrc")) $("meCapSrc").innerHTML = capSourceTag(o.cap_source) +
-    (m ? "" : ' <span class="hint">新增模型默认不预填任何能力：留空保存就是「未探测」，可事后用「导入」从上游拉。</span>');
-  $("modelEditorOverlay").classList.remove("hidden");
+    (m ? "" : ' <span class="hint">新增模型默认不预填任何能力：留空保存就是「未探测」。</span>');
   setTimeout(() => $("meId").focus(), 50);
-}
-
-function closeModelEditor() {
-  $("modelEditorOverlay").classList.add("hidden");
-  editModelIdx = -1;
-  // 从列表直接点 chip 进来时模型管理弹窗是关着的，关掉编辑弹窗后复位 mgrChIdx，
-  // 否则后续「导入」会误用这个残留渠道。
-  if ($("modelManagerOverlay").classList.contains("hidden")) mgrChIdx = -1;
 }
 
 function saveModelEditor() {
@@ -2868,78 +3042,77 @@ function saveModelEditor() {
   if (!rec.context_window) delete rec.context_window;
   if (!rec.max_tokens) delete rec.max_tokens;
   if (editModelIdx >= 0) ch.models[editModelIdx] = rec; else ch.models.push(rec);
-  closeModelEditor();
-  renderModelManager();
+  editModelIdx = -1;
   renderCustomChList();
+  renderImportList(); // 行尾的 ＋/− 状态要跟着变
   $("customChOk").textContent = "已更新，点击「保存全部配置」生效";
   $("customChErr").textContent = "";
 }
 
 // ---------- 自定义模型弹窗（R85） ----------
 // 设置里只留一个「配置自定义模型」按钮，实际增删改全在这个弹窗里。
-// 弹窗独立的好处：不用挤在设置的一长串 section 里滚来滚去，且宽度可单独给足。
+// editCustomBaseline 是打开时的快照，用来判「有没有改过」（R122：关闭要带保存语义）。
+let editCustomBaseline = "";
+
 function openCustomModels() {
   editCustomChannels = JSON.parse(JSON.stringify(state.custom_channels || []));
+  editCustomBaseline = JSON.stringify(editCustomChannels);
+  pendingRenames = [];
   renderCustomChList();
   $("customModelsOverlay").classList.remove("hidden");
 }
 
-function closeCustomModels() {
+// closeCustomModels 关闭（R122）：旧版直接把弹层藏起来，用户改完点「关闭」= 全部丢弃，
+// 而按钮长得跟「确定」一样。现改成：有改动先保存（热生效），再刷新模型列表与费率页，
+// 确保新 provider 当场出现在「模型列表和费率」里；保存失败则不关（错误得留在原地）。
+async function closeCustomModels() {
+  if (JSON.stringify(editCustomChannels) !== editCustomBaseline || pendingRenames.length) {
+    const ok = await saveCustomChannels();
+    if (!ok) return; // 保存失败：不关窗，错误已写在 customChErr
+  }
   $("customModelsOverlay").classList.add("hidden");
 }
 
+// saveCustomChannels 提交当前编辑态 + 改名映射，回 true=成功。
+// renames 不能不供：后端只比新旧两张表无法区分「改名」与「删一个 + 新增一个」，
+// 后者会把旧名的真 key 丢到新名上（R122）。
 async function saveCustomChannels() {
   try {
-    await api("/api/config/custom_channels", { channels: editCustomChannels });
-    toast("自定义模型已保存（热生效）");
+    const res = await api("/api/config/custom_channels", { channels: editCustomChannels, renames: pendingRenames });
+    const n = (res && res.renamed) || 0;
+    toast(n ? `自定义模型已保存（热生效），其中 ${n} 个渠道已改名` : "自定义模型已保存（热生效）");
     $("customChErr").textContent = "";
     $("customChOk").textContent = "已保存并立即生效";
-    loadState();
+    pendingRenames = [];
+    editCustomBaseline = JSON.stringify(editCustomChannels);
+    // 刷新两处口径：模型列表（state.models）与费率页（各渠道模型面），新渠道 must 当场出现
+    await Promise.all([loadState(), loadFees()]);
+    return true;
   } catch (e) {
     $("customChErr").textContent = e.message;
     $("customChOk").textContent = "";
+    return false;
   }
 }
 
-// ---------- 模型一键导入（R81） ----------
-// 背景：反代/官方 API 的 /models 端点通常能列出全部可用模型，手填模型 ID 既慢又容易
-// 打错字（打错的模型名不会报错，只在真正请求时 404）。这里拉一次 /models、勾选、批量加入。
-//
-// 默认参数取「保守可用」而不是「最优」：上下文 1M / 输出 64k / 三能力全开，与
-// 手填输入框的默认值一致（用户要精确值可再改表格）。导入只负责把模型**加进编辑态**，
-// 仍需点「保存全部配置」才落盘 —— 与既有「添加模型」交互一致，不引入新的隐式写入。
-let importCtx = { chIdx: -1, models: [] };
-
-// visibleImportIdx 当前筛选条件下可见的模型下标（全选/全不选只作用于可见行，
-// 与「所见即所选」一致；否则筛了 4 条点全选会把 100 条全勾上，用户看不出来）。
-function visibleImportIdx() {
-  const kw = $("importFilter").value.trim().toLowerCase();
-  const out = [];
-  importCtx.models.forEach((m, i) => {
-    if (!kw || m.id.toLowerCase().includes(kw)) out.push(i);
-  });
-  return out;
+// ---------- 能力搬运辅助（R119/R122）----------
+// 上游 /models 尽力解析出的能力原样搬进 ModelConfig，拉不到的字段一律不写。
+// 旧版在这里写死 1M/64k/全能力，面板与 /v1/models 于是把「不知道」说成「上游说的」
+// ——R119 推翻。cap_source="api" 才能被当作声明展示（与后端 custom.ModelCap.ToModelConfig 同口径）。
+function capToModelConfig(c) {
+  const rec = { id: c.id };
+  if (c.context_window) rec.context_window = c.context_window;
+  if (c.max_tokens) rec.max_tokens = c.max_tokens;
+  if (c.supports_images) rec.supports_images = true;
+  if (c.supports_reasoning) rec.supports_reasoning = true;
+  if (c.supports_tools === true || c.supports_tools === false) rec.supports_tools = c.supports_tools;
+  if (c.reasoning_efforts && c.reasoning_efforts.length) rec.reasoning_efforts = c.reasoning_efforts.slice();
+  if (c.default_reasoning_effort) rec.default_reasoning_effort = c.default_reasoning_effort;
+  if (c.cap_source) rec.cap_source = c.cap_source;
+  return rec;
 }
 
-function renderImportList() {
-  const kw = $("importFilter").value.trim().toLowerCase();
-  const rows = importCtx.models.map((m, i) => {
-    if (kw && !m.id.toLowerCase().includes(kw)) return "";
-    // 用 div + 显式 for/id 关联，而不是 label 包裹 input：
-    // label 包裹 input 时点 label 会「先由 label 转发、再被冒泡处理」双重切换
-    // （实测：点 label 反而把刚勾上的取消掉）。显式 for 只触发一次。
-    const cid = `imp-${i}`;
-    return `<div class="import-row"><input type="checkbox" id="${cid}" data-import-pick="${i}"${m.checked ? " checked" : ""}${m.exists ? " disabled" : ""}>` +
-      `<label class="import-name" for="${cid}"><code>${esc(m.id)}</code>${capSummaryHtml(m.cap)}</label>` +
-      (m.exists
-        ? `<button class="btn small cm-btn-cap" data-apply-cap="${i}"${m.cap ? "" : " disabled"} title="${m.cap ? "用本次拉到的上游能力覆写已存模型（不动模型 ID）" : "本次未拉到该模型的能力信息"}">更新能力</button>`
-        : "") +
-      `</div>`;
-  }).join("");
-  $("importList").innerHTML = rows || '<div class="hint">（没有匹配的模型）</div>';
-}
-
-// capSummaryHtml 导入行后面的能力摘要：拉到什么写什么，拉不到就标「未探测」。
+// capSummaryHtml 上游行后面的能力摘要：拉到什么写什么，拉不到就标「未探测」。
 // 这里绝不能出现「默认 1M」这类括号里补出来的字——那一行就是用户判断
 // 「该不该手工补填」的唯一依据（R119，推翻旧版编造默认值）。
 function capSummaryHtml(c) {
@@ -2955,55 +3128,12 @@ function capSummaryHtml(c) {
   return `<span class="cm-meta cap-api">${esc(bits.join("·"))}</span>`;
 }
 
-async function openModelImport(chIdx) {
-  const ch = editCustomChannels[chIdx];
-  if (!ch) return;
-  importCtx = { chIdx, models: [] };
-  $("importHint").textContent = `从 [${ch.name}] 的 /models 拉取…`;
-  $("importErr").textContent = "";
-  $("importFilter").value = "";
-  $("importList").innerHTML = '<div class="hint">加载中…</div>';
-  $("modelImportOverlay").classList.remove("hidden");
-  try {
-    const res = await probeCustomChannel(ch);
-    // 确认过的根就地回写（R121）：用户粘的可能是漏协议头或带 /chat/completions 尾巴的地址。
-    if (res.base_url && res.base_url !== ch.base_url) {
-      ch.base_url = res.base_url;
-      renderCustomChList();
-    }
-    if (!res.ok) {
-      const tried = (res.tries || []).map((t) => `${t.url} → ${t.status || t.err || "?"}`).join("； ");
-      $("importErr").textContent = `拉取失败：${res.error || "上游未返回模型列表"}${tried ? `（试过：${tried}）` : ""}`;
-      $("importList").innerHTML = "";
-      $("importHint").textContent = "";
-      return;
-    }
-    const have = new Set((ch.models || []).map((m) => (typeof m === "string" ? m : m.id)));
-    // 后端同一次探测既回纯 ID（兼容旧契约）又回 caps（尽力解析出的能力）；
-    // 拿不到 caps 时退回 ID 形态，能力列统一显示「未探测」，不编造默认值。
-    const caps = res.caps && res.caps.length ? res.caps : null;
-    const list = caps || (res.models || []).filter((id) => id).map((id) => ({ id }));
-    importCtx.models = list
-      .filter((c) => c && c.id)
-      .map((c) => ({ id: c.id, cap: caps ? c : null, exists: have.has(c.id), checked: !have.has(c.id) }));
-    const fresh = importCtx.models.filter((m) => !m.exists).length;
-    const noCap = importCtx.models.filter((m) => !m.cap).length;
-    $("importHint").textContent = `接入点 ${ch.base_url}${res.chat_ok ? "（对话端点已确认）" : ""}｜上游共 ${importCtx.models.length} 个模型，其中 ${fresh} 个未添加。` +
-      (noCap ? `有 ${noCap} 个上游没声明能力，导入后会在列表标「未探测」，需要的话请手动补填。` : "") +
-      "勾选后点「导入选中」，再点「保存全部配置」生效。";
-    renderImportList();
-  } catch (e) {
-    $("importErr").textContent = `拉取失败：${e.message}`;
-    $("importList").innerHTML = "";
-  }
-}
-
-// applyImportedCap 对「已存在」的模型只覆写能力字段（保留 ID 与用户其他改动）：
-// 旧版导入把 1M/64k 这类编造值写进了配置，新一键拉取后必须能就地把它们洗成上游真值，
-// 否则用户只能删了重新导入。
+// applyImportedCap 对「已添加」的模型只覆写能力字段（保留模型 ID 与其他改动）：
+// 旧版导入把 1M/64k 这类编造值写进了配置，重新拉取后必须能就地把它们洗成上游真值，
+// 否则用户只能删了重新加。
 function applyImportedCap(i) {
-  const ch = editCustomChannels[importCtx.chIdx];
-  const row = importCtx.models[i];
+  const ch = editCustomChannels[mgrChIdx];
+  const row = upstreamModels[i];
   if (!ch || !row || !row.cap) return;
   const k = (ch.models || []).findIndex((m) => (typeof m === "string" ? m : m.id) === row.id);
   if (k < 0) return;
@@ -3012,47 +3142,9 @@ function applyImportedCap(i) {
   ch.models[k] = cap;
   $("customChOk").textContent = `已用上游能力覆写 ${row.id}，点击「保存全部配置」生效`;
   renderCustomChList();
-  if (mgrChIdx === importCtx.chIdx) renderModelManager();
+  renderImportList();
 }
 
-// capToModelConfig 把探测到的能力写成 ModelConfig（只搬真实拿到的，拉不到就是零值）。
-// 旧版在这里写死 1M/64k/全能力，面板与 /v1/models 于是把「不知道」说成「上游说的」——
-// R119 推翻。cap_source="api" 才能被当作声明展示（与后端 custom.ModelCap.ToModelConfig 同口径）。
-function capToModelConfig(c) {
-  const rec = { id: c.id };
-  if (c.context_window) rec.context_window = c.context_window;
-  if (c.max_tokens) rec.max_tokens = c.max_tokens;
-  if (c.supports_images) rec.supports_images = true;
-  if (c.supports_reasoning) rec.supports_reasoning = true;
-  if (c.supports_tools === true || c.supports_tools === false) rec.supports_tools = c.supports_tools;
-  if (c.reasoning_efforts && c.reasoning_efforts.length) rec.reasoning_efforts = c.reasoning_efforts.slice();
-  if (c.default_reasoning_effort) rec.default_reasoning_effort = c.default_reasoning_effort;
-  if (c.cap_source) rec.cap_source = c.cap_source;
-  return rec;
-}
-
-function confirmModelImport() {
-  const ch = editCustomChannels[importCtx.chIdx];
-  if (!ch) return closeModelImport();
-  ch.models = ch.models || [];
-  let added = 0;
-  for (const m of importCtx.models) {
-    if (!m.checked || m.exists) continue;
-    ch.models.push(m.cap ? capToModelConfig(m.cap) : { id: m.id });
-    added++;
-  }
-  closeModelImport();
-  renderCustomChList();
-  $("customChOk").textContent = added
-    ? `已导入 ${added} 个模型，点击「保存全部配置」生效`
-    : "没有新增模型（选中的都已存在）";
-  $("customChErr").textContent = "";
-}
-
-function closeModelImport() {
-  $("modelImportOverlay").classList.add("hidden");
-  importCtx = { chIdx: -1, models: [] };
-}
 
 // validateBackupProxy 校验备用上游通道地址，返回 [url, err]（空串合法 = 关闭）。
 // 判据与后端 backuplink.Parse 同源：仅 http/https/socks5，且必须有主机名。
@@ -3585,12 +3677,11 @@ function bind() {
       openChannelEditor(+editChBtn.dataset.editCustom);
       return;
     }
-    // 模型行：编辑 / 删除（R85 起模型各占一行，不再有 chip）
+    // 模型行：编辑（进模型面板的手填页签，R122）
     const editModelBtn = e.target.closest("[data-edit-model-in]");
     if (editModelBtn) {
       const [ci, mi] = editModelBtn.dataset.editModelIn.split(":").map(Number);
-      mgrChIdx = ci;                      // 模型编辑弹窗依赖 mgrChIdx 定位渠道
-      openModelEditor(mi);
+      openModelPick(ci, "manual", mi);
       return;
     }
     const delModelBtn = e.target.closest("[data-del-model-in]");
@@ -3604,16 +3695,10 @@ function bind() {
       }
       return;
     }
-    // Provider 行：新增模型
+    // Provider 行：「＋ 模型」直接进面板上游列表页签（R122：导入与手填已合并）
     const addModelBtn = e.target.closest("[data-add-model-in]");
     if (addModelBtn) {
-      mgrChIdx = +addModelBtn.dataset.addModelIn;
-      openModelEditor(-1);
-      return;
-    }
-    const importBtn = e.target.closest("[data-import-custom]");
-    if (importBtn) {
-      openModelImport(+importBtn.dataset.importCustom);
+      openModelPick(+addModelBtn.dataset.addModelIn, "api");
       return;
     }
     const delBtn = e.target.closest("[data-del-custom]");
@@ -3632,8 +3717,9 @@ function bind() {
   $("btnCustomAdd").onclick = () => openChannelEditor(-1);
   // ---- 自定义模型弹窗（R85）----
   $("btnOpenCustomModels").onclick = () => openCustomModels();
+  // 关闭 = 有改动先保存（R122），与「保存」区别只在关掉窗口；保存失败不关窗。
   $("btnCustomClose").onclick = () => closeCustomModels();
-  $("btnCustomSave").onclick = saveCustomChannels;
+  $("btnCustomSave").onclick = () => saveCustomChannels();
   $("customModelsOverlay").onclick = (e) => { if (e.target === $("customModelsOverlay")) closeCustomModels(); };
 
 
@@ -3644,70 +3730,35 @@ function bind() {
   $("channelEditorOverlay").onclick = (e) => { if (e.target === $("channelEditorOverlay")) closeChannelEditor(); };
   $("ceURL").onkeydown = (e) => { if (e.key === "Enter") saveChannelEditor(); };
 
-  // ---- 模型管理弹窗（R82） ----
-  $("btnMgrClose").onclick = () => closeModelManager();
-  $("modelManagerOverlay").onclick = (e) => { if (e.target === $("modelManagerOverlay")) closeModelManager(); };
-  $("btnMgrAdd").onclick = () => openModelEditor(-1);
-  $("btnMgrImport").onclick = () => { if (mgrChIdx >= 0) openModelImport(mgrChIdx); };
-  $("modelMgrList").addEventListener("click", (e) => {
-    const editBtn = e.target.closest("[data-edit-model]");
-    if (editBtn) return openModelEditor(+editBtn.dataset.editModel);
-    const delLink = e.target.closest("[data-del-model]");
-    if (delLink) {
-      const ch = editCustomChannels[mgrChIdx];
-      const j = +delLink.dataset.delModel;
-      if (ch && ch.models && ch.models[j] !== undefined) {
-        ch.models.splice(j, 1);
-        renderModelManager();
-        renderCustomChList();
-      }
-      return;
-    }
+  // ---- 模型面板（R122：上游列表 + 手填合成一个 tab panel）----
+  $("btnPickClose").onclick = () => closeModelPick();
+  $("modelPickOverlay").onclick = (e) => { if (e.target === $("modelPickOverlay")) closeModelPick(); };
+  $("modelPickOverlay").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-pick-tab]");
+    if (!t) return;
+    e.preventDefault();
+    // 点「手动添加 / 编辑」要带一张干净表单进来（否则会看到上一个模型的残留值）
+    if (t.dataset.pickTab === "manual") openModelEditor(-1);
+    else switchPickTab("api");
   });
-
-  // ---- 单个模型编辑弹窗（R82） ----
-  $("btnMeCancel").onclick = () => closeModelEditor();
+  $("btnImportAgain").onclick = () => loadUpstreamModels();
   $("btnMeSave").onclick = () => saveModelEditor();
-  $("modelEditorOverlay").onclick = (e) => { if (e.target === $("modelEditorOverlay")) closeModelEditor(); };
   $("meId").onkeydown = (e) => { if (e.key === "Enter") saveModelEditor(); };
-
-  // 点击弹层空白处关闭
-  $("settingsOverlay").onclick = (e) => { if (e.target === $("settingsOverlay")) closeSettings(); };
-
-  // ---- 模型导入弹层（R81） ----
-  $("btnImportCancel").onclick = () => closeModelImport();
-  $("btnImportConfirm").onclick = () => confirmModelImport();
-  $("modelImportOverlay").onclick = (e) => { if (e.target === $("modelImportOverlay")) closeModelImport(); };
-  $("importFilter").oninput = () => renderImportList();
-  // 全选/全不选：只同步「已渲染的 checkbox」的 checked，**不重建列表**。
-  // 重建会让用户手上/事件队列里的 DOM 节点变成孤儿——change 事件落到已废弃节点上，
-  // importCtx 收不到更新（实测：全不选后再手动勾选，models 里始终是 0）。
-  const syncChecks = () => {
-    document.querySelectorAll("#importList [data-import-pick]").forEach((cb) => {
-      const i = +cb.dataset.importPick;
-      if (importCtx.models[i]) cb.checked = importCtx.models[i].checked;
-    });
-  };
-  $("btnImportAll").onclick = () => {
-    for (const i of visibleImportIdx()) if (!importCtx.models[i].exists) importCtx.models[i].checked = true;
-    syncChecks();
-  };
-  $("btnImportNone").onclick = () => {
-    for (const i of visibleImportIdx()) importCtx.models[i].checked = false;
-    syncChecks();
-  };
-  // 「更新能力」按钮（勾上的行不重建，整块重渲染靠委托）
+  // 行尾 ＋/− 与「更新能力」：列表整块重建，一律委托在容器上。
+  // 不用 label 包 input（旧版双切换 Bug 就这来的），按钮就是按钮。
   $("importList").onclick = (e) => {
+    const tg = e.target.closest("[data-pick-toggle]");
+    if (tg) { togglePickModel(+tg.dataset.pickToggle); return; }
     const capBtn = e.target.closest("[data-apply-cap]");
     if (capBtn) applyImportedCap(+capBtn.dataset.applyCap);
   };
-  // 用事件委托绑定在容器上（列表会整块重建，绑在元素上会随重建丢失）
-  $("importList").onchange = (e) => {
-    const cb = e.target.closest("[data-import-pick]");
-    if (!cb) return;
-    const i = +cb.dataset.importPick;
-    if (importCtx.models[i]) importCtx.models[i].checked = cb.checked;
-  };
+  $("importFilter").oninput = () => renderImportList();
+
+  // 眼睛图标（R122）：编辑渠道时也能看明文，与复制链路同样「点一下才取那一条」。
+  $("btnCeEye").onclick = () => toggleCeKeyEye();
+
+  // 点击弹层空白处关闭
+  $("settingsOverlay").onclick = (e) => { if (e.target === $("settingsOverlay")) closeSettings(); };
   $("renameOverlay").onclick = (e) => { if (e.target === $("renameOverlay")) closeRename(); };
   $("helpOverlay").onclick = (e) => { if (e.target === $("helpOverlay")) closeHelp(); };
 

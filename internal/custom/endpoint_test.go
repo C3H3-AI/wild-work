@@ -16,7 +16,15 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{"https://x.com/v1/chat/completions/", "https://x.com/v1"},
 		{"https://x.com/v1/completions", "https://x.com/v1"},                       // legacy 尾巴同样剥（只是不再剥第二层）
 		{"https://x.com/v1/chat/completions/chat/completions", "https://x.com/v1"}, // 连粘两层要剥到不动为止
-		{"https://x.com/V1/Chat/Completions", "https://x.com/V1"},                  // 大小写不敏感匹配，但保留原大小写
+		// R122：用户常直接把目录地址（浏览器里看到的 /models）粘进来，不剥会拼出 {root}/models/models，
+		// 表现为「上游没有模型目录」——其实是他自己拼错了，这个坑必须静默治好而不是报错。
+		{"https://api.x.com/v1/models", "https://api.x.com/v1"},
+		{"https://api.x.com/v1/models/", "https://api.x.com/v1"},
+		{"https://api.x.com/models", "https://api.x.com"},
+		{"https://x.com/v1/models/models", "https://x.com/v1"},
+		{"https://x.com/v1/models/chat/completions", "https://x.com/v1"},                // 混合尾巴也要剥到不动
+		{"https://x.com/api/passthrough/v1/models", "https://x.com/api/passthrough/v1"}, // 中间前缀段不得动
+		{"https://x.com/V1/Chat/Completions", "https://x.com/V1"},                       // 大小写不敏感匹配，但保留原大小写
 		// 缺协议头：内网补 http、公网补 https
 		{"127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1"},
 		{"localhost:8000/v1", "http://localhost:8000/v1"},

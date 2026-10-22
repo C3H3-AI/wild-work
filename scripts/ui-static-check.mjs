@@ -1042,7 +1042,7 @@ for (const [label, re] of uniq) {
       return ["app.js 的 $() DOM 引用无悬空（防 openSettings 抛 TypeError 打不开弹层）", missing.length === 0];
     })(),
     // ---- 跟进项（PR #121：自定义渠道 UI 打磨，R66 延续）----
-    ["模型新增走弹窗（R82：列表里不再内嵌添加行）", raw.includes('$("btnMgrAdd").onclick') && raw.includes("function openModelEditor(")],
+    ["模型新增走弹窗（R82：列表里不再内嵌添加行；R122 改成 tab panel 的手填页签）", raw.includes('$("btnMeSave").onclick') && raw.includes("function openModelEditor(")],
     ["上下文/输出输入支持 k/M 单位（parseTokens）", raw.includes("function parseTokens(") && raw.includes("function formatTokenCount(")],
     // R119 推翻旧口径：输入框不再预填 1M/64k 这类猜测值——留空就是「未探测」，
     // 面板绝不能把猜的冒充上游声明（同 R49「只透传声明」）。
@@ -1358,9 +1358,9 @@ for (const [label, re] of uniq) {
     /\.cm-info \{[^}]*white-space: nowrap/.test(css));
   check5("每个 Provider 一个区块、其下每个模型各占一行",
     /class="cm-provider"/.test(raw) && /class="cm-model-row"/.test(raw));
-  check5("Provider 行功能完整（编辑/导入/加模型/删除；R87 去掉测试）",
-    ['data-edit-custom', 'data-import-custom', 'data-add-model-in', 'data-del-custom']
-      .every((a) => raw.includes(a)) && !raw.includes('data-test-custom'));
+  check5("Provider 行功能完整（编辑/＋模型/删除；R122 导入已并进「＋ 模型」）",
+    ['data-edit-custom', 'data-add-model-in', 'data-del-custom']
+      .every((a) => raw.includes(a)) && !raw.includes('data-import-custom') && !raw.includes('data-test-custom'));
   check5("每行按钮组整体右对齐（信息区 flex:1 + 按钮组 margin-left:auto）",
     /\.cm-provider-row, \.cm-model-row \{[^}]*display: flex/.test(css) &&
     /\.cm-info \{[^}]*flex: 1 1 auto/.test(css) &&
@@ -1377,13 +1377,13 @@ for (const [label, re] of uniq) {
   check5("Provider 行 URL 用省略号收窄（不撑破布局）",
     /\.cm-url \{[^}]*text-overflow: ellipsis/.test(css));
   // R83：模型与渠道同一行展示，模型 chip 是可点的文字按钮
-  check5("模型行可点编辑（打开模型编辑弹窗）",
-    /data-edit-model-in\]"?\)[\s\S]{0,200}?mgrChIdx = ci/.test(raw));
+  check5("模型行可点编辑（打开模型面板的手填页签，不打上游）",
+    /data-edit-model-in\]"?\)[\s\S]{0,200}?openModelPick\(ci, "manual", mi\)/.test(raw));
   // R83：删除改为文字按钮，不再用 🗑 / × 图标
   check5("删除渠道是文字按钮（不是 🗑 emoji）",
     /data-del-custom="\$\{i\}"[^>]*>删除</.test(raw) && !/data-del-custom="\$\{i\}"[^>]*>🗑/.test(raw));
   check5("删除模型是文字按钮（不是 × 图标）",
-    /data-del-model="\$\{j\}"[^>]*>删除</.test(raw));
+    /data-del-model-in="\$\{i\}:\$\{j\}"[^>]*>删除</.test(raw));
   check5("危险按钮有 danger 样式",
     /\.btn\.danger \{/.test(css));
   // R83：停用功能整体移除（前端按钮 + 后端 enabled 字段）
@@ -1391,12 +1391,21 @@ for (const [label, re] of uniq) {
   check5("后端 ChannelConfig 不再有 Enabled 字段",
     !readFileSync(new URL("../internal/custom/config.go", import.meta.url), "utf8").includes("Enabled *bool"));
   check5("Provider 行有编辑入口", /data-edit-custom=/.test(raw));
-  check5("三个新弹层都存在（渠道编辑/模型管理/模型编辑）",
-    ['channelEditorOverlay', 'modelManagerOverlay', 'modelEditorOverlay'].every((id) => html.includes(`id="${id}"`)));
-  check5("模型管理弹窗一行式 + 可增删改",
-    /function renderModelManager\(\)/.test(raw) && /data-edit-model=/.test(raw) && /data-del-model=/.test(raw));
-  check5("渠道标识在编辑态不可改（它是模型前缀，改名=换路由）",
-    /\$\("ceName"\)\.disabled = !!ch/.test(raw));
+  // R122：三个弹窗（模型管理/单模型编辑/导入勾选）合成一个 tab panel。
+  check5("渠道编辑弹层 + 模型面板弹层存在，旧三个弹层已删除",
+    html.includes('id="channelEditorOverlay"') && html.includes('id="modelPickOverlay"') &&
+    !html.includes('id="modelManagerOverlay"') && !html.includes('id="modelEditorOverlay"') &&
+    !html.includes('id="modelImportOverlay"'));
+  check5("模型面板两个页签齐备（上游列表 / 手动添加）",
+    /data-pick-tab="api"/.test(html) && /data-pick-tab="manual"/.test(html) &&
+    html.includes('id="pickPaneApi"') && html.includes('id="pickPaneManual"') &&
+    /function switchPickTab\(tab\)/.test(raw));
+  // 渠道标识从「禁改」放开：用户要求能改，代价（旧前缀 400、历史流水留旧名）由前端
+  // 弹确认告知 + 后端级联 config 引用；不写 renames 后端无法区分改名与「删+增」。
+  check5("渠道标识可改且提交 renames 映射（R122：反 R82 的 disabled）",
+    /\$\("ceName"\)\.disabled = false/.test(raw) && !/\$\("ceName"\)\.disabled = !!ch/.test(raw) &&
+    /pendingRenames\.push\(\{ new: name, old: ch\.name \}\)/.test(raw) &&
+    /api\/config\/custom_channels", \{ channels: editCustomChannels, renames: pendingRenames \}/.test(raw));
   check5("新增渠道不再依赖底部输入行（旧输入框已移除）",
     !html.includes('id="inCustomName"') && !raw.includes('addPendingCustomInputs'));
   // 下拉框自绘箭头（原生箭头又小又贴边）
@@ -1424,24 +1433,25 @@ for (const [label, re] of uniq) {
     (css.match(/^\.modal(?:\.modal-(?:wide|xwide|search))? \{/gm) || []).length <= 5 &&
     /\.modal\.modal-xwide \{[^}]*width: 1180px/.test(css));
 
-  // 一键导入
-  check5("渠道卡片有「导入模型」按钮", /data-import-custom=/.test(raw));
-  check5("导入弹层存在且带筛选/全选/全不选/确认", 
-    ['modelImportOverlay', 'importFilter', 'btnImportAll', 'btnImportNone', 'btnImportConfirm']
-      .every((id) => html.includes(`id="${id}"`)));
-  check5("导入走既有 custom_channel_test 端点（不新增拉模型接口）",
+  // 一键导入→逐行 ＋/−（R122：勾完还要点「导入选中」再点「保存」，中间那步没有意义）
+  check5("不再有独立的「导入模型」按钮（已并进「＋ 模型」）",
+    !/data-import-custom=/.test(raw) && !/btnImportAll|btnImportNone|btnImportConfirm|btnImportCancel/.test(html));
+  check5("模型面板带筛选与「重新拉取」（不预置全选/全不选/导入选中）",
+    html.includes('id="importFilter"') && html.includes('id="btnImportAgain"') && html.includes('id="importList"'));
+  check5("上游清单走既有 custom_channel_test 端点（不新增拉模型接口）",
     /function probeCustomChannel\(ch\)[\s\S]{0,400}?\/api\/config\/custom_channel_test/.test(raw) &&
-    /function openModelImport\([\s\S]{0,700}?probeCustomChannel\(/.test(raw));
-  check5("已存在的模型不可勾选（避免重复导入）",
-    /exists: have\.has\(/.test(raw) && /\$\{m\.exists \? " disabled" : ""\}/.test(raw));
-  check5("导入只改编辑态、仍需「保存全部配置」落盘（不隐式写盘）",
-    /confirmModelImport[\s\S]{0,900}?保存全部配置/.test(raw));
+    /async function loadUpstreamModels\(\)[\s\S]{0,700}?probeCustomChannel\(/.test(raw));
+  check5("已添加的行给「－ 移除」与「更新能力」，未添加的行给「＋」（R122）",
+    /data-pick-toggle="\$\{i\}"[^>]*>－<|>－<\/button>[\s\S]{0,200}?data-apply-cap="\$\{i\}"/.test(raw) &&
+    /data-pick-toggle="\$\{i\}"[^>]*>＋</.test(raw));
+  check5("点 ＋/− 只改编辑态、仍需「保存/关闭」落盘（不隐式写盘）",
+    /function togglePickModel\(i\)[\s\S]{0,1200}?点「保存」生效/.test(raw));
   // R119：旧断言要求导入时写死 1M/64k + 三能力全开，那是**编造**上游没说的话，
   // 已整体推翻。现在要求的是反面：拉到什么写什么，拉不到只存 ID。
   check5("导入不再编造默认值（R119：无 1000000/64000 硬编码）",
     !/context_window: 1000000/.test(raw) && !/supports_images: true, supports_reasoning: true, supports_tools: true/.test(raw));
-  check5("导入按 cap 写配置、无 cap 只存 ID（R119）",
-    /ch\.models\.push\(m\.cap \? capToModelConfig\(m\.cap\) : \{ id: m\.id \}\)/.test(raw));
+  check5("加入按 cap 写配置、无 cap 只存 ID（R119/R122）",
+    /ch\.models\.push\(row\.cap \? capToModelConfig\(row\.cap\) : \{ id: row\.id \}\)/.test(raw));
   check5("caps 字段直接进配置且带 cap_source（R119）",
     /function capToModelConfig\(c\)[\s\S]{0,700}?rec\.cap_source = c\.cap_source/.test(raw));
   check5("导入行展示上游能力摘要，拿不到标「未探测」（R119）",
@@ -1454,13 +1464,13 @@ for (const [label, re] of uniq) {
   check5("费率页自定义渠道显示接入点与脱敏 key（R119）",
     /function feeChannelAccessHtml\(ch\)/.test(raw) && /fee-copy-url/.test(raw) && /fee-copy-key/.test(raw) &&
     css.includes(".fee-access") && css.includes(".fee-access-v"));
-  check5("api-key 明文只在点复制时按需取（R119：面板不得缓存明文）",
+  check5("api-key 明文只在点复制/点眼睛时按需取（R119/R122：面板不得缓存明文）",
     /async function copyCustomKey\(name\)/.test(raw) &&
     /api\("\/api\/config\/custom_channel_key", \{ name \}\)/.test(raw));
   check5("列表/费率载荷里的 key 不得当 title 明文悬浮显示（R119）",
     !/title="\$\{esc\(c\.api_key\)\}"/.test(raw));
   check5("新建渠道后自动拉一次上游模型（R119：endpoint+key 填完即可勾选）",
-    /saveChannelEditor[\s\S]{0,900}?openModelImport\(/.test(raw));
+    /editCustomChannels\.push\(\{ name, base_url: url, api_key: key, models: \[\] \}\)[\s\S]{0,600}?openModelPick\(idx, "api"\)/.test(raw));
   check5("费率页上下文/能力措辞按来源区分（R119：手填/实测不冒充上游）",
     /CAP_SRC_TEXT/.test(raw) && raw.includes("面板手填值") && raw.includes("上游接口返回"));
   // R121：接入点规范化 + 端点定位。面板不得自己拼 /v1（只有上游能回答「哪个根是真的」），
@@ -1486,28 +1496,69 @@ for (const [label, re] of uniq) {
   check5("探测失败要列出逐条 tries 而不是只一句「连接失败」（R121）",
     /res\.tries[\s\S]{0,400}?→/.test(raw) && /function applyProbeResult/.test(raw));
   check5("渠道编辑器留了结论回显位（R121）", html.includes('id="ceHint"'));
+  // R122：识别详情从 API Key 行里搬出来单独成行（端点结论是一长串：根 + 试过哪几个 +
+  // 各回什么），和输入框同行会把框挤没。判定：ceHint 不得在 cfg-row 内部。
+  check5("识别详情/错误独立成行，不挤在 API Key 行里（R122）", (() => {
+    const a = html.indexOf('id="channelEditorOverlay"');
+    const b = html.indexOf('id="modelPickOverlay"');
+    if (a < 0 || b < a) return false;
+    const seg = html.slice(a, b);
+    const k = seg.indexOf('API Key'), h = seg.indexOf('id="ceHint"');
+    // ceHint 必须在 API Key 那一行已经收尾（</div></div>）之后，否则它还在 cfg-row 里
+    return k > 0 && h > k && /<\/div><\/div>[\s\S]{0,400}?id="ceHint"/.test(seg.slice(k));
+  })());
+  // R122：API Key 旁有眼睛，且明文只活在本弹窗（关窗即清）
+  check5("API Key 行有眼睛按钮，取明文与关窗即清逻辑齐备（R122）",
+    html.includes('id="btnCeEye"') && /\$\("btnCeEye"\)\.onclick[\s\S]{0,60}toggleCeKeyEye\(\)/.test(raw) &&
+    /async function toggleCeKeyEye\(\)/.test(raw) &&
+    /function closeChannelEditor\(\)[\s\S]{0,400}?ceKeyPlain = ""/.test(raw) &&
+    /\$\("ceKey"\)\.type = "password"/.test(raw));
+  check5("列表/费率载荷里的 key 不得当 title 明文悬浮显示（R119）",
+    !/title="\$\{esc\(c\.api_key\)\}"/.test(raw));
   check5("导入列表有滚动容器样式", /\.import-list \{ max-height/.test(css));
-  // 导入弹层叠在自定义渠道弹层之上：.overlay 基类 z-index=100，
-  // 写比它小的值会被压在下面（实测：坐标点模型名落到下层卡片上，勾不上）。
-  check5("导入弹层 z-index 高于 .overlay 基类（100），否则会被下层弹层遮挡",
-    /id="modelImportOverlay" style="z-index:(1[1-9]\d|[2-9]\d\d+)"/.test(html));
-  // 不得用 label 包裹 input：点 label 会「label 转发 + 冒泡」双重切换，
-  // 实测表现为「点模型名反而把刚勾上的取消」。改用 div + 显式 for/id。
-  check5("导入行用 div+显式 for/id 关联（label 包裹会双重切换）",
-    raw.includes('<div class="import-row"><input type="checkbox" id=') &&
-    raw.includes('<label class="import-name" for=') &&
-    !raw.includes('<label class="import-row"><input type="checkbox"'));
-  // 全选/全不选**不得重建列表**：重建会让用户手上/事件队列里的节点变孤儿，
-  // 后续 change 落到废弃节点上，importCtx 收不到更新（实测 bug：全不选后再勾，恒 0）。
-  check5("全选/全不选只同步 checked、不重建列表（避免孤儿节点吞掉 change）",
-    /const syncChecks = \(\) => \{[\s\S]{0,300}?querySelectorAll\("#importList \[data-import-pick\]"\)/.test(raw) &&
-    !/btnImportNone"\)\.onclick = \(\) => \{[\s\S]{0,200}?renderImportList\(\)/.test(raw));
-  // 全选/全不选只作用于「当前筛选可见」的行：否则筛 4 条点全选会悄悄勾上全部。
-  check5("全选/全不选只作用于筛选后的可见行（所见即所选）",
-    /function visibleImportIdx\(\)/.test(raw) &&
-    /for \(const i of visibleImportIdx\(\)\)/.test(raw));
-  check5("导入失败时给出可见错误（不静默）",
-    /拉取失败：/.test(raw) && /\(\"importErr\"\)\.textContent = /.test(raw));
+  // 模型面板叠在自定义渠道弹层之上：.overlay 基类 z-index=100，
+  // 写比它小的值会被压在下面（实测：坐标点模型名落到下层卡片上，点不动）。
+  check5("模型面板 z-index 高于 .overlay 基类（100），否则会被下层弹层遮挡",
+    /id="modelPickOverlay" style="z-index:(1[1-9]\d|[2-9]\d\d+)"/.test(html));
+  // 不得用 label 包裹 input：点 label 会「label 转发 + 冒泡」双重切换（旧勾选框实测 bug）。
+  // R122 彻底去掉勾选框：行尾就是 ＋/− 按钮，没有中间态。
+  check5("导入行不再用 checkbox/label 包裹（改成行尾 ＋/− 按钮）",
+    !/data-import-pick/.test(raw) && !/<label class="import-row"/.test(raw) &&
+    /<div class="import-row/.test(raw));
+  check5("面板切换页签时手填表单重置为新建（不残留上一个模型的值）",
+    /t\.dataset\.pickTab === "manual"\) openModelEditor\(-1\)/.test(raw));
+  // R122：主面板「关闭」必须有保存语义，否则用户「＋ 模型」加完点关闭会静默丢弃。
+  check5("自定义渠道主面板「关闭」带保存语义（脏则先存，存败不关窗）",
+    /async function closeCustomModels\(\)[\s\S]{0,400}?await saveCustomChannels\(\)[\s\S]{0,120}?if \(!ok\) return/.test(raw) &&
+    /\$\("btnCustomClose"\)\.onclick = \(\) => closeCustomModels\(\)/.test(raw));
+  check5("保存后立即刷新模型列表与费率页（R122：新 provider 当场出现在模型列表）",
+    /async function saveCustomChannels\(\)[\s\S]{0,900}?await Promise\.all\(\[loadState\(\), loadFees\(\)\]\)/.test(raw));
+  // R122 需求8：费率页接入点行后的「显示全部模型」开关。打开必须**现拉**一次上游，
+  // 不得读本地配置（本地只有已添加的那几个），也不得把拉到的写进配置。
+  check5("费率页接入点行后有「显示全部模型」开关（默认关）",
+    /data-allmodels="\$\{esc\(ch\.channel\)\}"/.test(raw) && /feeShowAll\.has\(ch\.channel\)[\s\S]{0,40}\? " checked"/.test(raw) &&
+    css.includes(".fee-all-wrap") && css.includes(".fee-all-box"));
+  check5("开关走 change 委托（label 包 input 时 click 会双重切换）、打开才拉上游",
+    /input\[data-allmodels\]/.test(raw) && /async function toggleFeeAllModels\(chName, on\)/.test(raw) &&
+    !/data-allmodels[\s\S]{0,200}?addEventListener\("click"/.test(raw));
+  check5("「显示全部模型」只展示不写盘（R122：拉到的全量不进 editCustomChannels）",
+    /function feeAllBoxHtml\(chName\)/.test(raw) &&
+    !/toggleFeeAllModels[\s\S]{0,900}?editCustomChannels/.test(raw));
+  check5("拉取失败时给出可见错误（不静默）",
+    /拉取失败：/.test(raw) && /\("importErr"\)\.textContent = /.test(raw));
+  // R122 后端：/models 响应上限与超时。OpenRouter 一类目录 3~4MiB，旧 1MiB 截断后
+  // JSON 解不动，表现为「点导入不是每次都能列出列表」——用户实测报的 5 号缺陷。
+  check5("探测响应上限放宽到 8MiB、超时 45s（R122：1MiB 截断会把大目录打成「非法 JSON」）", (() => {
+    const src = readFileSync(new URL("../internal/custom/probe.go", import.meta.url), "utf8");
+    return /probeBodyCap = 8 << 20/.test(src) && /probeTimeout = 45 \* time\.Second/.test(src) &&
+      !/io\.LimitReader\(resp\.Body, 1 << 20\)/.test(src);
+  })());
+  // 用户粘的常是目录地址 {root}/models，本包内部一律拼 {BaseURL}/models ⇒ 会变成
+  // {root}/models/models，看着像「上游没有 /models」实为自己拼错。规范化必须剔掉这条尾巴。
+  check5("规范化会剔掉 /models 尾巴（R122：不得拼出 /models/models）", (() => {
+    const src = readFileSync(new URL("../internal/custom/endpoint.go", import.meta.url), "utf8");
+    return /"\/models"/.test(src) && !/chatTails/.test(src);
+  })());
 
   for (const [label, pass, extra] of need5) {
     console.log(`  ${pass ? "✅" : "❌"} ${label}${!pass && extra ? `  ← ${extra}` : ""}`);

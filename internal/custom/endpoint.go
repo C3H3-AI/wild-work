@@ -11,12 +11,15 @@ import (
 // 本包内部一律按「API 根 + /chat/completions」拼请求，所以入口必须先规整，
 // 否则会把尾巴带进 base，拼出 /v1/chat/completions/chat/completions 这种必死地址。
 
-// chatTails 可安全剥离的「端点尾巴」（大小写不敏感，长的在前）。
+// apiTails 可安全剥离的「端点尾巴」（大小写不敏感，长的在前）。
 //
-// 为什么只剥这两个：自定义渠道的 Upstream 只发 Chat Completions（client.go 里写死拼
-// /chat/completions），用户粘进来的地址若已含该尾巴，留着它必然是错的。
+// 为什么只剥这几个：自定义渠道的 Upstream 只发 Chat Completions（client.go 里写死拼
+// /chat/completions），用户粘进来的地址若已含该尾巴，留着它必然是错的；
+// /models 尾巴（R122）同理——面板「识别端点」让用户粘的就是目录地址，
+// 留着会拼出 {root}/models/models 这种必死路径，而它看上去像「上游没有 /models」，
+// 实际是我们自己拼错了。
 // 其余路径段（/step_plan/v1、/api/passthrough/v1 之类）是网关自己的前缀，绝不猜测删除。
-var chatTails = []string{"/chat/completions", "/completions"}
+var apiTails = []string{"/chat/completions", "/completions", "/models"}
 
 // localHostPrefixes 本机/内网地址前缀：这类地址默认 http（本地 one-api、llama.cpp、vllm）。
 var localHostPrefixes = []string{"localhost", "127.", "0.0.0.0", "::1", "[::1]", "192.168.", "10.", "172.16.", "host.docker.internal"}
@@ -54,7 +57,7 @@ func NormalizeBaseURL(raw string) string {
 	p := strings.TrimRight(u.Path, "/")
 	for {
 		low, cut := strings.ToLower(p), false
-		for _, t := range chatTails {
+		for _, t := range apiTails {
 			if strings.HasSuffix(low, t) {
 				p = strings.TrimRight(p[:len(p)-len(t)], "/") // 按长度切，保住原始大小写
 				cut = true

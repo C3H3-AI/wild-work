@@ -571,6 +571,15 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .fee-access-v:hover { color: var(--primary); border-color: var(--primary); background: #e0e7ff; }
+/* 「显示全部模型」开关（R122）：沿用全局 .switch 形状，在这一行里缩小一号免得撑高 */
+.fee-all-wrap { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.fee-all-wrap .switch { width: 34px; height: 18px; flex: none; }
+.fee-all-wrap .slider:before { width: 12px; height: 12px; left: 3px; bottom: 3px; }
+.fee-all-wrap .switch input:checked + .slider:before { transform: translateX(16px); }
+.fee-all-box { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 6px 0 2px; padding: 8px 10px; background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; }
+.fee-all-item { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+.fee-all-item code { font-family: ui-monospace, Consolas, monospace; }
+.fee-all-item.added { opacity: .75; }
 
 /* 能力来源徽标（R119）：上游声明 / 面板手填 / 未探测 三态。
    复用于自定义模型列表、模型管理行、导入勾选行，颜色走项目设计令牌不在两处写死。 */
@@ -916,6 +925,9 @@ select.input::-ms-expand, .select::-ms-expand { display: none; }
 .import-row { display: flex; align-items: center; gap: 8px; padding: 4px 4px; font-size: 12px; cursor: pointer; border-radius: 4px; }
 .import-row:hover { background: var(--bg, #f8fafc); }
 .import-name { flex: 1; min-width: 0; cursor: pointer; }
+/* R122：行尾改成 ＋/− 按钮，行不再可点（label 没包 input，点看无效） */
+.import-row .import-name { cursor: default; }
+.import-row.picked { background: #f0fdf4; }
 .import-row code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
 .import-row input[type="checkbox"] { flex-shrink: 0; }
 

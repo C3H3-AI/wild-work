@@ -192,3 +192,86 @@ func TestDiscoverSendsBearerAndCleanPath(t *testing.T) {
 		t.Fatalf("尾斜杠应被削掉：%+v", d)
 	}
 }
+
+// TestDiscoverHandlesLargeModelList 锁住响应体上限（R122 第 5 条真凶）。
+// 旧实现只读 1MiB，OpenRouter 一类目录响应 3~4MiB ⇒ JSON 被拦腰截断，报「上游返回的不是合法
+// JSON」，用户侧表现成「点导入不是每次都能列出模型列表」。这里造一个 ~4MiB 的目录，
+// 上限一旦调回 1MiB 本测试当场变红。
+func TestDiscoverHandlesLargeModelList(t *testing.T) {
+	const n = 4000 // 每条约 1KB（带一段填充文本）⇒ 合计 ~4MiB
+	var sb strings.Builder
+	sb.WriteString(`{"data":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		// pad 把单条撑到约 1KB，模拟真实目录里 description 之类的长字段
+		sb.WriteString(`{"id":"model-`)
+		sb.WriteString(strings.Repeat("x", 8) + string(rune('A'+i%26)) + string(rune('a'+i%26)))
+		sb.WriteString(`","name":"m","description":"`)
+		sb.WriteString(strings.Repeat("d", 900))
+		sb.WriteString(`","context_window":131072}`)
+	}
+	sb.WriteString(`]}`)
+	body := sb.String()
+	if len(body) < 3<<20 {
+		t.Fatalf("样本太小（%d 字节），测不出上限", len(body))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(body))
+		case "/v1/chat/completions":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d, err := Discover(ChannelConfig{Name: "big", BaseURL: srv.URL, APIKey: "k"})
+	if err != nil {
+		t.Fatalf("大目录不应被判成非法 JSON：%v（tries=%+v）", err, d.Tries)
+	}
+	if len(d.Caps) != n {
+		t.Fatalf("模型条数不符：%d ≠ %d（疑似响应被截断）", len(d.Caps), n)
+	}
+	if d.Caps[n-1].ContextWindow != 131072 || d.Caps[n-1].CapSource != CapSourceAPI {
+		t.Fatalf("尾部条目能力丢失：%+v", d.Caps[n-1])
+	}
+}
+
+// TestDiscoverDirectoryTailIsStripped 用户把目录地址（/models）直接粘进来时，规范化必须剥掉
+// 这条尾巴，否则内部拼出 {root}/models/models ⇒ 看似「上游没有模型目录」（R122）。
+func TestDiscoverDirectoryTailIsStripped(t *testing.T) {
+	var hits []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"a","context_window":8192}]}`))
+		case "/v1/chat/completions":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d, err := Discover(ChannelConfig{Name: "t2", BaseURL: srv.URL + "/v1/models", APIKey: "k"})
+	if err != nil {
+		t.Fatalf("粘目录地址应当能定位成功：%v（tries=%+v）", err, d.Tries)
+	}
+	if d.Base != srv.URL+"/v1" || !d.Renormed {
+		t.Fatalf("没剥掉 /models 尾巴：%+v", d)
+	}
+	for _, h := range hits {
+		if strings.Contains(h, "/models/models") {
+			t.Fatalf("拼出了重复目录路径：%s", h)
+		}
+	}
+	if len(d.Caps) != 1 || d.Caps[0].ContextWindow != 8192 {
+		t.Fatalf("能力没拿回来：%+v", d.Caps)
+	}
+}
