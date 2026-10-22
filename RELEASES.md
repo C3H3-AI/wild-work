@@ -3584,3 +3584,137 @@ DeepSeek Harness 的 system prompt 正是以这句开头，于是经本代理转
 | [@jianzhangg](https://github.com/jianzhangg) | R116 会话头族分层 + 国内版补齐、R117 身份链对齐官方桌面、R118 小浣熊等响应头 180s |
 | [@A-Beansprout](https://github.com/A-Beansprout) | 华为云果办云端按日消耗查询与端点契约/时区测试（PR #180） |
 | [@wzwjustdoit](https://github.com/wzwjustdoit) | R115 续写：DSH Web GUI 品牌短语脱敏（PR #185），含完整 prompt 二分定位 |
+
+# wild-work v2.9.6
+
+本版重心是**把自定义渠道面板改到手**（八项，R122）+ 模型目录对外补齐 OpenRouter 规范字段
+（R124）+ 签到时间改就地选择（PR #187）。对应决议 **R122 / R123 / R124**。
+
+> ⚠️ **自动更新没进本版**。PR #188 的更新引擎已单独劈到 **`feat/auto-update`** 分支
+> （= master + PR #188，默认 `enabled=false` / `auto_check=false`，已修 Windows 必红的测试）。
+> 它有十条已知问题（digest 与产物同源自证、无平台闸门、无回滚窗口、空闲看门狗只有注释等），
+> 需要的人自行拉该分支构建；主线暂不含任何自替换二进制的代码。
+
+## 🔌 自定义渠道面板：八项改进（R122）
+
+上一版能拉模型、能认端点，但用起来处处别扭。这版逐条改掉：
+
+**① 渠道标识可以改名了**（以前编辑态是灰的）
+标识**就是** `provider.Kind`：状态文件名 `state-custom-<name>.json`、虚拟账号 UID、模型前缀
+`name/model`、降级链、思考强度映射全以它为键。所以改名不是改一个字段，而是一次级联：
+
+- 面板**显式提交** `renames:[{new, old}]` —— 只比对新旧两张表无法区分「改名」与
+  「删掉一个 + 新增一个」，必须让人说清楚。
+- 后端 `SetCustomChannels` 按**新名**查不到脱敏串时必须回退查**旧名**找回真实密钥，
+  否则用户改了名、面板把脱敏串当新值提交，真 key 会被空串覆盖并落盘（最致命的一条）。
+- 联动改写 `compat.model_map`、`compat.default_channel`、`model_fallback`（`From` 与 `To`
+  两侧）、`reasoning_efforts` 的**键**，并把新表推给降级链/思考强度的内存副本。这四类配置
+  只校形状、不校渠道是否存在 ⇒ 不联动就是「配置还在、永久静默失效」。
+- 旧的 `state-custom-<旧名>.json` 改名留档为 `.old`，**不搬到新名**（旧文件里的 UID 是
+  `custom-<旧名>`，搬过去等于塞进一堆对不上号的条目）。
+- 改名前会弹确认，如实列出代价。
+
+**② API Key 加了「眼睛」**（R121 只能点复制）
+点眼睛 → 向 `POST /api/config/custom_channel_key` **按需取这一条**明文填进输入框，再点收回、
+关窗即清。明文只活在「弹窗开着」那段时间：列表、`/api/state`、`/api/fees` 一律只给脱敏串
+（这两个接口每 30s 轮询，批量下发明文等于让第三方 key 长期驻留在浏览器里）。新增渠道时密钥
+就在你手上，点眼睛就地切换，不发请求。
+
+**③ 识别详情独立成行**
+以前「✓ 根 / 模型目录 N 个 / 对话端点存在」和输入框挤在一行，长串会把输入框挤没。现在挪到
+下面独立一行。
+
+**④ 导入与手填合并成一个 tab panel**
+「＋ 模型」按钮打开同一个弹层：**上游列表** / **手动添加·编辑** 两页签。手填页签不会打上游。
+（原来三个弹层互相跳，改一个模型要点四五次。）
+
+**⑤ 「点导入不是每次都能列出模型列表」——这条是真缺陷，已修**
+`TestConnection` 旧版把响应体截在 **1 MiB**，OpenRouter 一类目录有 3~4 MiB ⇒ JSON 被拦腰截断 ⇒
+报「上游返回的不是合法 JSON」，看起来就像「这个上游列不出模型」。现在上限提到 **8 MiB**
+（超限明确报错，不给半截清单），超时 15s→45s（走加速代理时首字节本就有几十秒）。
+另外规范化会把结尾的 `/models` 也当 API 尾巴剥掉——有人粘的就是目录地址，
+不剥会拼出 `{root}/models/models`，看着像「上游没有 /models」，实际是我们自己拼错。
+
+**⑥ 导入列表改成行内 ＋/− 即时增删**
+每个模型行尾一个 ＋（未添加）/ −（已添加），点一下就进/出该渠道的配置；删掉「全选」「全不选」
+「导入选中」三个按钮和那步没有意义的中间确认。已添加的行仍可「更新能力」（把上一版被编造出来的
+`1M/64k/全能力开` 洗成上游真值）。
+
+**⑦「关闭」现在有保存语义**
+以前自定义渠道弹层的「关闭」就是关窗，**没保存的东西静默丢掉**。现在：脏了先保存，保存失败
+**不关窗**（错误留在原地），成功后立刻刷新一次模型列表与费率页 ⇒ 新加的 provider 当场出现在
+模型列表里，不用重启、不用再点别的按钮。
+
+**⑧ 费率页加「显示全部模型」开关**
+自定义渠道的接入点那一行后面多了个 switch，默认关 = 现在行为（只显示已配置的模型）。
+打开才**现拉**一次该 provider 的 `/models`，把上游有、本地没配置的模型列在旁边，标「未添加」，
+有能力的顺带显示能力。这个开关**只展示、不写盘**，也不是常开（费率页 30s 轮询不能变成每 30s
+打一次上游）。想添加请回到渠道面板点 ＋。
+
+## 📋 `/v1/models` 补 OpenRouter 规范字段（PR #189 → R124）
+
+出站模型目录现在按**已声明的能力**输出：
+
+- `supported_parameters`：`SupportsTools` ⇒ `tools`、`tool_choice`；有思考档位 ⇒ `reasoning`、
+  `reasoning_effort`；两者皆无 ⇒ 整个字段**缺席**（不是空数组）。
+- `reasoning.mandatory` = `!can_disable_thinking`，且**只在上游明确给过这个信息时出现**；
+  上游没说的，绝不脑补 `mandatory: true`。
+- 与 issue #96 的既有字段（`supported_efforts` / `default_effort` / `can_disable_thinking`）
+  并列保留，两类客户端都能读。
+
+**合入时剔掉了 `include_reasoning`**：这个参数本仓全仓零处理点（入站只吃 `reasoning_effort`
+和 Responses 的 `reasoning` 对象）。在 `/v1/models` 上宣告一个我们不接的参数，等于让客户端
+照着发、然后被静默忽略——与 R49「只透传声明，绝不编造」是同一条红线，所以删掉并加了护栏断言：
+`supported_parameters` 里出现 `include_reasoning`/`temperature`/`top_p` 即测试失败。
+
+## 🕐 签到时间改就地时间选择器（PR #187）
+
+设置里点「＋ 时间」以前直接塞当前时刻，等于让你先猜再改。现在弹出就地时间选择器，
+可手动选到分钟。
+
+## 🧪 验证
+
+- `go build ./... && go vet ./... && go test ./...` 全绿；`node scripts/ui-static-check.mjs`
+  全部通过（本版**改写 17 条**旧断言 + 新增 20 余条 R122/R124 断言，其中两条是**有意反转**：
+  「渠道标识编辑态不可改」→「可改且必须提交 renames」、「导入行用 checkbox/label」→
+  「不得再有 checkbox，行尾 ＋/− 按钮」）。
+- 本版新增回归：`internal/app/custom_rename_test.go`（`TestCustomChannelRenameCascade` 五件事：
+  按旧名找回真实密钥、四类引用联动、旧 state 留 `.old`、两个 syncer 都被推、新名可解析而旧名失效；
+  `TestCustomChannelRenameInvalidDropped` 三类非法改名必须静默丢弃）、
+  `internal/custom/discover_test.go`（4 MiB/4000 条大目录全须解出；粘 `/v1/models` 不得拼出
+  `/models/models`）、`internal/custom/endpoint_test.go`（补 6 例 `/models` 尾巴）、
+  `internal/server/handler_models_test.go`（`TestModelEntryOpenRouterParameters` 四子例）。
+- **变异验证 16 处逐条确认变红**（不按旧名找回密钥 / 引用表方向写反 / 不推 syncer / 不迁移旧
+  state / `default_channel` 不联动 / 无效改名不丢弃 / 上限退回 1 MiB / 不剥 `/models` 尾巴 /
+  不规范化 BaseURL / 「全部模型」顺手写盘 / 「关闭」丢掉保存语义 / 保存后不刷费率页 / 标识回到
+  禁改 / 关窗不清明文 / 前端恢复二次脱敏 / 眼睛按钮没接线）。
+- 发版前 `go test -count=1 ./...` 连跑两轮全绿（48 个包），并把上面两个墙钟测试改成事件驱动。
+- 单测当场抓出两处我自己写错的东西：`renameCustomRefs` 的映射方向（**新→旧**用于密钥找回，
+  引用表里出现的是**旧名**，首版直接用反方向的表 ⇒ 四类配置一条都没联动）、以及上一版
+  把「密钥被上游拒绝」写成「端点已确认」。
+
+## ⚠️ 已知限制
+
+- **历史流水仍记旧渠道名**。用量/积分账本里的渠道名是记账当时的名字，改名不会把历史洗成新名
+  （那等于伪造账本），面板上会看到改名前后分成两段。
+- 改名后**旧前缀模型立即不可用**：`glm-old/xxx` 会直接 `400 unknown channel`，不做别名兼容；
+  客户端里硬编码旧前缀的地方需要自己改。
+- 「显示全部模型」是**只读展示**，不代勾选、不落盘；探测结果不缓存（每次打开现拉一次）。
+- 上游只回 `id` 的 OpenAI 官方形态仍然什么都探测不到，标「未探测」，能力要手填——这是有意的：
+  本仓不给上游没说的话签字。
+- `stats.RegisterChannelKind` 只增不删，改掉的旧渠道名在运行统计里会残留一个零值条目（不影响路由与账本）。
+- `internal/app` 三个**用墙钟做断言**的测试本机偶发假红，本版已改掉其中两个：
+  `TestCreditAutoRefreshSurvivesFailure` / `TestCreditAutoRefreshCancels` 改成「先轮询到真的跑过一轮
+  再取基线」（`cancel()` 时可能有请求在途，旧写法在在途期间取基线 ⇒ 取消后计数继续涨的假红）；
+  自定义渠道测试的 `t.TempDir()` 换成 `appTempDir(t)`（Windows 下 pool 异步落盘与自动清理撞车，
+  实测报 `TempDir RemoveAll cleanup: … The directory is not empty`）。
+  **`TestSetListenRequiresPassword` 仍会在跨包并行（`go test ./...`）时偶发**（它真去占
+  17863/17864 端口，负载高时监听切换来不及落定），单跑与整包跑均稳定绿，非本版引入。
+
+## 🙏 致谢
+
+| 贡献者 | 内容 |
+|---|---|
+| [@xxhhlk](https://github.com/xxhhlk) | PR #187：签到时间改就地时间选择器 |
+| [@zrtzrt](https://github.com/zrtzrt)（代码作者 reno） | PR #189：`/v1/models` 输出 `supported_parameters` 与 `reasoning.mandatory`（R124） |
+

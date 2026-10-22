@@ -188,11 +188,16 @@ func TestCreditAutoRefreshSurvivesFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.StartCreditAutoRefresh(ctx, []provider.Kind{provider.WorkBuddyAI}, 60*time.Millisecond)
-	time.Sleep(300 * time.Millisecond)
+	// 等「至少跑过一轮失败」再放开，不用固定墙钟：全量并发（-parallel 13）下本机调度能把
+	// 300ms 拖到秒级，旧写法出现过假失败。
+	warm := time.Now().Add(3 * time.Second)
+	for up.resourceCalls.Load() == 0 && time.Now().Before(warm) {
+		time.Sleep(10 * time.Millisecond)
+	}
 
-	// 放开失败，循环应继续并在下个周期成功
+	// 放开失败，循环应继续并在下个周期成功（预算同样给宽，只验「不死循环不退出」这一语义）
 	up.failResource.Store(false)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if st, ok := p.Status("uid-x"); ok && st.Credits == 50 {
 			return
@@ -209,12 +214,17 @@ func TestCreditAutoRefreshCancels(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.StartCreditAutoRefresh(ctx, []provider.Kind{provider.WorkBuddyAI}, 50*time.Millisecond)
-	time.Sleep(200 * time.Millisecond)
+	// 先确认真的跑过一轮（否则「从来没刷新」也会让后面的断言空转变绿）
+	warm := time.Now().Add(3 * time.Second)
+	for up.resourceCalls.Load() == 0 && time.Now().Before(warm) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel()
-	time.Sleep(150 * time.Millisecond)
-
+	// 基线必须在 cancel **之后**取：取消时可能正好有一个请求在途，它结束后会计一次，
+	// 旧写法在 in-flight 期间取基线 ⇒ 全量并发下假红（实测 0.90s 那一轮）。
+	time.Sleep(500 * time.Millisecond)
 	after := up.resourceCalls.Load()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond) // 足够走 20+ 个 50ms 周期
 	if up.resourceCalls.Load() != after {
 		t.Errorf("取消后仍在刷新：%d → %d", after, up.resourceCalls.Load())
 	}

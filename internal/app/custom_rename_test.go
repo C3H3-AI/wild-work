@@ -19,7 +19,7 @@ import (
 //
 // ③ 旧 state 文件留 .old 不硬删（照 migrateStateFiles 先例，可回滚）。
 func TestCustomChannelRenameCascade(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -133,7 +133,7 @@ func TestCustomChannelRenameCascade(t *testing.T) {
 // TestCustomChannelRenameInvalidDropped 非法改名声明必须被丢弃而不是把配置搅坏：
 // 旧名不存在（可能是面板残留的陈旧 pendingRenames）、新名已存在、新旧同名，都不参与级联。
 func TestCustomChannelRenameInvalidDropped(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"

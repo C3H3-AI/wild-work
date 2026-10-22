@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -16,8 +17,30 @@ import (
 	"wild-work/internal/provider"
 )
 
+// appTempDir 替代 t.TempDir：自定义渠道会在该目录里起 pool（state.json / state-custom-*.json），
+// Windows 下异步落盘与 Go 的自动清理会撞车，实测报
+// 「TempDir RemoveAll cleanup: unlinkat …: The directory is not empty」或「文件被另一个进程占用」，
+// 在全量并发跑时把不相干的测试带红。自己清理 = 带重试 + 最后仍有残留只记日志不判失败。
+func appTempDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "ww-test-")
+	if err != nil {
+		t.Fatalf("建临时目录失败: %v", err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 60; i++ {
+			if os.RemoveAll(d) == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Logf("临时目录残留未清理（Windows 异步落盘，不影响断言）：%s", d)
+	})
+	return d
+}
+
 func TestCustomChannelsAPIAndHotReload(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -130,7 +153,7 @@ func TestCustomChannelsAPIAndHotReload(t *testing.T) {
 // 面板回显的是脱敏值（含 …），用户没改动该渠道时提交回来的仍是脱敏串；
 // 若原样落盘就把真实密钥换成了废值，下次请求全部 401。
 func TestCustomChannelKeyMaskedRoundTrip(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -208,7 +231,7 @@ func TestFeesOrderIncludesDynamicChannels(t *testing.T) {
 // 原始实现里 UpdateCustomRuntimes 在 a.mu 下写 map，而 allStatuses/runtime 等
 // 9 处读点全程不加锁 —— 这是本仓首个 post-init 写（此前 runtimes 只在 init 赋值）。
 func TestRuntimeTableConcurrentAccess(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -271,7 +294,7 @@ func TestRuntimeTableConcurrentAccess(t *testing.T) {
 // 脱敏回显态时用真实密钥（否则未改动过的渠道测试恒 401，同 #117 的探针不同源问题）。
 // 端点在收到含 「…」 的 key 时按 name 从配置找回真实密钥。
 func TestCustomChannelTestEndpointResolvesMaskedKey(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -319,7 +342,7 @@ func TestCustomChannelTestEndpointResolvesMaskedKey(t *testing.T) {
 // 前端勾选导入时靠 caps 写配置，拿不到的字段必须留空（而不是让前端补 1M/64k 那种猜测值）。
 // models 字段保持旧形状（[]string），不破既有契约。
 func TestCustomChannelTestEndpointReturnsCaps(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -381,7 +404,7 @@ func TestCustomChannelTestEndpointReturnsCaps(t *testing.T) {
 // TestCustomChannelKeyRevealEndpoint 点「复制 key」才下发的那条接口（R119）：
 // ① 明文只在被点名时回一次；② 未知渠道报错；③ 渠道列表/费率载荷里绝不得出现明文。
 func TestCustomChannelKeyRevealEndpoint(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -435,7 +458,7 @@ func TestCustomChannelKeyRevealEndpoint(t *testing.T) {
 // 故意走 FeesInfo() 全链路而不是单测 applyCustomFeesMeta：漏接调用点（只写了方法没调）
 // 必须当场变红，否则面板永远看不到接入点。明文不得出现、脱敏串必须出现，也在同一条里证。
 func TestFeesCarriesCustomAccessAndCapSource(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
@@ -583,7 +606,7 @@ func TestIsMaskedKeyRecognizesLegacyMarks(t *testing.T) {
 // 定位失败时也要 200 + 逐条 tries，让面板说得出「试了哪几个地址、各回什么」，
 // 而不是只有一句「连接失败」；明文密钥绝不得出现在响应里。
 func TestCustomChannelTestEndpointLocatesBase(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := appTempDir(t)
 	cfg := config.Default()
 	cfg.StateFile = tmpDir + "/state.json"
 	cfgPath := tmpDir + "/config.json"
