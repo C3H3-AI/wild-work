@@ -22,9 +22,15 @@ const (
 	dshIdentity = "You are an AI agent powered by DeepSeek Harness"
 	// DSH Web GUI 段：与后半句连成 221 字符整段逐字串才拦，单句放行。
 	dshWebGUI = "DeepSeek Harness Web GUI"
+	// DSH @ 引用约定段（2026-10-28）：上游锚的是「@ 引用说明 + 相对/绝对路径说明」两句连排
+	// 的逐字文本，单句放行、两句连排才 400；改第一句即失配，改第二句无效。
+	dshPathsPre  = "Tokens prefixed with @"
+	dshPathsRel  = "Relative paths resolve from the workspace root"
+	dshPathsFull = "Tokens prefixed with @ are paths the user explicitly referenced."
+	dshPathsRest = "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
 )
 
-// 本包 featHeaders 的逐字节快照（9 项）。
+// 本包 featHeaders 的逐字节快照（11 项）。
 var wantFeatures = []string{
 	"x-anthropic-billing-header",
 	"cc_entrypoint=",
@@ -35,9 +41,11 @@ var wantFeatures = []string{
 	"11128",
 	dshIdentity,
 	dshWebGUI,
+	dshPathsPre,
+	dshPathsRel,
 }
 
-// 本包 rewrites 的逐字节快照（7 对）。
+// 本包 rewrites 的逐字节快照（9 对）。
 var wantRewrites = [][2]string{
 	{"You are Claude Code, Anthropic's official CLI for Claude",
 		"You are Claude Code, Anthropic's official CLI tool for Claude"},
@@ -50,6 +58,8 @@ var wantRewrites = [][2]string{
 	{"11128", "11-128"},
 	{dshIdentity, "You are an AI agent powered by the DeepSeek Harness"},
 	{dshWebGUI, "DSH Web GUI"},
+	{dshPathsFull, "Tokens starting with @ are paths the user explicitly referenced."},
+	{dshPathsRest, "Relative paths resolve under the workspace root; absolute paths identify files or directories on the host."},
 }
 
 func TestTablesByteExactSnapshot(t *testing.T) {
@@ -105,6 +115,23 @@ func TestDSHVariantsUntouched(t *testing.T) {
 		if got := systemOf(t, Messages(bodyWithSystem(t, in))); got != in {
 			t.Errorf("变体被误改: %q -> %q", in, got)
 		}
+	}
+}
+
+// DSH @ 引用约定段：两句连排必须被破坏（上游单句放行，我们两句都改）。
+func TestDSHPathsParagraphRewritten(t *testing.T) {
+	in := dshPathsFull + " " + dshPathsRest + " A trailing slash marks it as a directory."
+	out := systemOf(t, Messages(bodyWithSystem(t, in)))
+	for _, fp := range []string{dshPathsFull, dshPathsRest} {
+		if strings.Contains(out, fp) {
+			t.Fatalf("指纹残留 %q：%q", fp, out)
+		}
+	}
+	if !strings.Contains(out, "Tokens starting with @") {
+		t.Errorf("@ 引用段改写缺失: %q", out)
+	}
+	if !strings.Contains(out, "A trailing slash marks it as a directory.") {
+		t.Errorf("非指纹措辞被误删: %q", out)
 	}
 }
 

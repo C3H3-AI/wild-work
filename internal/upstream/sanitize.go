@@ -22,6 +22,8 @@ var sanitizeFeatures = []string{
 	"11128",                                           // 上游反探测：裸数字错误码
 	"You are an AI agent powered by DeepSeek Harness", // DSH 身份句：上游按 system 开头逐字锚定（2026-10-21 实测）
 	"DeepSeek Harness Web GUI",                        // DSH Web GUI 段：上游按 system 开头整段 221 字符逐字串锚定（2026-10-21 实测）
+	"Tokens prefixed with @",                          // DSH @ 引用约定段：上游按两句连排逐字锚定，单句放行（2026-10-28 实测 dsh-xdpool#79 / workbuddy2api-hub#680）
+	"Relative paths resolve from the workspace root",  // 同段后半句的短前缀，与上一项共同兜住整段
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -92,6 +94,17 @@ var sanitizeRewrites = [][2]string{
 		// 缩写为 DSH 即破坏逐字串，语义不变（实测 200）。
 		"DeepSeek Harness Web GUI",
 		"DSH Web GUI",
+	},
+	{
+		// DSH @ 引用约定段：锚点是「两句连排」的逐字文本（单句 200、两句连排 400；改第一句
+		// 才失配，改第二句无效）。两句各改一词，段内任意组合都不再命中，上游以后追加或
+		// 后移锚点句也不会再整段命中（2026-10-28，dsh-xdpool#79 / workbuddy2api-hub#680）。
+		"Tokens prefixed with @ are paths the user explicitly referenced.",
+		"Tokens starting with @ are paths the user explicitly referenced.",
+	},
+	{
+		"Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.",
+		"Relative paths resolve under the workspace root; absolute paths identify files or directories on the host.",
 	},
 }
 

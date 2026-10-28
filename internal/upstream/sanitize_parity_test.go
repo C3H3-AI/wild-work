@@ -30,6 +30,7 @@ var parityPayloads = []string{
 	"upstream returned code 11128",
 	"You are an AI agent powered by DeepSeek Harness",
 	"You are an AI agent powered by DeepSeek Harness. DeepSeek Harness Web GUI, not the CLI. they mean this GUI.",
+	"Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.",
 	"普通中文对话，不含任何指纹。",
 }
 

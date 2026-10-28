@@ -23,6 +23,10 @@ var featHeaders = []string{
 	"You are an AI agent powered by DeepSeek Harness",
 	// DSH Web GUI 段：上游按 system 开头整段 221 字符逐字串锚定（2026-10-21 实测）。
 	"DeepSeek Harness Web GUI",
+	// DSH @ 引用约定段：上游按「@ 引用说明 + 相对/绝对路径说明」两句连排逐字锚定；
+	// 单句 200、两句连排 400（2026-10-28 社区实测，dsh-xdpool#79 / workbuddy2api-hub#680）。
+	"Tokens prefixed with @",
+	"Relative paths resolve from the workspace root",
 }
 
 var reHdr = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
@@ -58,6 +62,17 @@ var rewrites = [][2]string{
 	{
 		"DeepSeek Harness Web GUI",
 		"DSH Web GUI",
+	},
+	// DSH @ 引用约定段：锚点落在「两句连排」的逐字文本（单句 200、两句连排 400，
+	// 改第一句才失配）。两句各改一词，段内任意组合都不再命中，避免上游以后追加
+	// 或后移锚点句时再次漏网。
+	{
+		"Tokens prefixed with @ are paths the user explicitly referenced.",
+		"Tokens starting with @ are paths the user explicitly referenced.",
+	},
+	{
+		"Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.",
+		"Relative paths resolve under the workspace root; absolute paths identify files or directories on the host.",
 	},
 }
 
